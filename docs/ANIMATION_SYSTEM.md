@@ -458,18 +458,18 @@ adb pull /sdcard/x.png out.png
 
 ---
 
-## 9. 运行时资产加载实证：战斗到底读了哪些包
+## 8. 运行时资产加载实证：战斗到底读了哪些包
 
-这一章回答了前面一直悬着的「743 个骨骼动画服务哪块玩法」。方法是**在战斗进行中直接采样进程打开的 AssetBundle 文件描述符**，比看画面更硬。
+这一章回答前面一直悬着的「743 个骨骼动画服务哪块玩法」。方法是**在战斗进行中直接采样进程打开的 AssetBundle 文件描述符**，比看画面更硬。
 
-### 9.1 采样方法
+### 8.1 采样方法
 
 ```bash
 # 战斗进行中（约 10 秒后仍在打）
 adb shell "ls -l /proc/4129/fd | grep -o 'Assets/[^ ]*' | sed 's#Assets/##' | sort"
 ```
 
-### 9.2 战斗中的实际打开清单（两次采样一致，共 13 个包）
+### 8.2 战斗中的实际打开清单（两次采样一致，共 13 个包）
 
 ```
 legacybuildresource_textures
@@ -484,7 +484,7 @@ spritecollection_allringcollection / _hammercollection
 
 → **结论：战斗表现层不读 `fbx_*`，也不读 `pc_texture_*`。** 之前把 3D 骨骼路径当成角色主渲染链是错的。
 
-### 9.3 单位贴图包的真实结构（`skin_npc_sister`，142,625 B）
+### 8.3 单位贴图包的真实结构（`skin_npc_sister`，142,625 B）
 
 | 项 | 值 |
 |---|---|
@@ -496,7 +496,7 @@ spritecollection_allringcollection / _hammercollection
 
 `SC@` 前缀 = 由 SpriteCollection 导出。**包内没有 `tk2dSpriteCollectionData`，也没有任何网格** —— 只有贴图与材质。
 
-### 9.4 贴图内容：菱形 UV 岛 + 帧序列
+### 8.4 贴图内容：菱形 UV 岛 + 帧序列
 
 ![单位皮肤图集](anim/unit_skin_atlas.png)
 
@@ -511,7 +511,7 @@ spritecollection_allringcollection / _hammercollection
   → 之前用 `texture_wa_6_1` 渲染时人物看起来"斜着、拼版状"，原因就在这里
 - 小图帧序列说明**动作是靠换帧（flipbook）或 UV 缩放/偏移推进**，配合 `CQUnityAnimation` 的 float 曲线
 
-### 9.5 `legacybuildresource_animationclip` 的 45 个 clip 全是 UI/FX
+### 8.5 `legacybuildresource_animationclip` 的 45 个 clip 全是 UI/FX
 
 实测该包 45 个片段，没有一个叫 `attack1 / move / death`：
 
@@ -528,14 +528,14 @@ spritecollection_allringcollection / _hammercollection
 → `CQUnityAnimation` 确实是**真实在跑的播放器**（该包在 fd 里常驻），但它的服务对象是
 **UI / 过场 / 特效 / 演出**，不是战斗单位。
 
-### 9.6 像素级判据（旁证）
+### 8.6 像素级判据（旁证）
 
 ![战斗单位 4 倍放大](anim/zoom_fight_4x.png)
 
 4 倍最近邻放大后，同一画面里两名角色的**像素块尺寸完全一致**。若为透视下的 3D 网格，
 不同景深的纹素密度必然不同 → 支持"平面四边形 + 预畸变贴图"的结论。
 
-### 9.7 结论汇总（对本仓库前几章的修正）
+### 8.7 结论汇总（对本仓库前几章的修正）
 
 | 原判断 | 修正后 |
 |---|---|
@@ -551,7 +551,7 @@ spritecollection_allringcollection / _hammercollection
 
 ---
 
-## 8. 地址速查
+## 9. 地址速查
 
 | 用途 | 地址(modoff) |
 |---|---|
