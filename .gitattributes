@@ -1,0 +1,11 @@
+# 统一使用 LF，避免跨平台 checkout 产生伪差异
+* text=auto eol=lf
+
+# 数据文件不做任何换行转换（逐字节保持不变）
+*.json -text
+*.bf1  -text
+
+# 脚本
+*.py   text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
