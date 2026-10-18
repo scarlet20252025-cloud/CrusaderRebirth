@@ -633,3 +633,75 @@ ImageUtil: Cannot find sprite def from collection {0}, {1}
 
 ---
 
+## 11. Godot 复现环境（引擎选型落地）
+
+### 11.1 选型结论
+
+在 Godot / Cocos 4 / Bevy / Unity / Unreal 之间比较后选 **Godot 4.7.2**：
+
+| 维度 | 判断 |
+|---|---|
+| 许可 | MIT，真开源 |
+| 自动化可行性 | 单个 exe + `--path` + 命令行截图，已验证；无登录、无许可证 |
+| 与 tk2d/fbx 资源的贴合 | `Sprite2D`/`AtlasTexture`/`AnimatedSprite2D` 对应精灵；`ArrayMesh`+CPU 蒙皮对应 1 骨骼/顶点的低模 |
+| MCP | `godot-mcp-enhanced` 0.34.1（33 工具/199 动作）；`Coding-Solo/godot-mcp`；`hi-godot/godot-ai` |
+| 放弃 Cocos 的理由 | COCOS 4 已 MIT 开源（2026-01），但正处编辑器/headless 拆分迁移期，MCP 生态为早期第三方 |
+
+**保真度不取决于引擎**：决定因素是 POINT 过滤、禁 mipmap、整数缩放、pivot/trim、alpha 是否预乘。
+资产管线（PNG + 帧矩形 + 曲线 JSON）与引擎无关，换引擎只需重写场景层约 200 行。
+
+### 11.2 环境
+
+- 引擎：`E:\DSH\tools\godot\Godot_v4.7.2-stable_win64.exe`（4.7.2.stable.official.ed1daf0bf）
+- 工程：`E:\DSH\cq\godot_cq`
+  - `main.tscn` + `viewer.gd` —— 2D 图集查看器（`skin_*`）
+  - `main3d.tscn` + `viewer3d.gd` —— 3D 骨骼角色复现（`fbx_pc@*`）
+  - `assets/`（2D）与 `assets3d/`（3D）
+- 路径必须全 ASCII：曾用中文路径写配置，落盘成 `E:\DSH\鑲ラ奔涔愬洯\` 乱码
+
+### 11.3 3D 角色管线（已跑通）
+
+```
+UnityPy 读 fbx_pc@staff
+  ├─ Transform 树 → nodes[{name,parent,t,r,s}]（58 个节点）
+  ├─ Mesh（取顶点最多者）→ pos/uv/boneIdx/tris/bindpose
+  │    73 顶点 / 37 三角 / 17 bindpose / boneIdx max=16
+  ├─ AnimationClip → clips[{name,rate,dur,tracks[{node,type,keys}]}]
+  │    idle 1.0s/43轨 · attack1 0.7083s/51 · attack2 0.7083s/51
+  │    move 0.4167s/43 · death 1.25s/51
+  └─ pc_texture_hero_hero_005 → 51 张 PNG（选 texture_wi_5_5 128×128）
+        ↓  hero_staff.json（71,008 B）
+Godot viewer3d.gd
+  ├─ 每帧：局部 TRS 按曲线覆盖 → 世界矩阵累乘 → boneWorld×bindpose → CPU 蒙皮
+  ├─ ArrayMesh 重建（73 顶点，逐帧重建开销可忽略）
+  ├─ StandardMaterial3D：SHADING_MODE_UNSHADED + TEXTURE_FILTER_NEAREST
+  │   + TRANSPARENCY_ALPHA_SCISSOR(0.5) + CULL_DISABLED
+  └─ Camera3D 正交；取景只统计「UV 处 alpha>0.25」的顶点（否则被大四边形撑爆）
+```
+
+运行：
+
+```powershell
+godot --path E:\DSH\cq\godot_cq --rendering-driver opengl3 --resolution 480x480 `
+  res://main3d.tscn -- --shot=E:\...\out.png --clip=attack1 --frame=4
+```
+
+### 11.4 输出
+
+![Godot 复现的 fbx 角色（5 clip × 4 帧）](anim/hero_fbx_godot.png)
+
+- 行的顺序：`idle / attack1 / attack2 / move / death`；列＝第 0/4/8/12 帧
+- **像素风脸部 + 低模身体**在 Godot 里被正确重现，且各 clip 的姿态差异可见
+- 角色只有"头+半身"是因为 `fbx_pc@staff` 内只有 `ChaMesh_Resize` 一个网格；
+  身体其余部件由 `pc_accessory_*` 提供，尚未接入
+
+### 11.5 已知限制
+
+1. `save_png` 只能写工作区路径，写 `E:\DSH\cq\` 返回 `err=12`
+2. Windows 上 `--headless` 不渲染，必须 `--rendering-driver opengl3` 起窗口
+3. 配件（`pc_accessory_wizard` 2,389,799 B）与 `CharacterPartsDefinition` 的
+   `ResourcePrefab`/`Texture`/`PositionMode` 装配逻辑尚未实现
+4. 曲线采样用线性插值 + 四元数 nlerp，Unity 原生是 Hermite/球面插值，高速动作可能有细微差异
+
+---
+
