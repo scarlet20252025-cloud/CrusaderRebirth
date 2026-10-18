@@ -941,3 +941,271 @@ BattleEffectDamage.ApplyStatic (0x295A850)
 - `HITRATE_MIN_CAP` / `HITRATE_MAX_CAP`（命中率上下限）
 - `ATKSPD_CAP`（攻速上限）
 - 全部 `block_buffs` / `battlebuffjson` / `addstate` 的倍率表
+
+---
+
+# 追加三：`BattleSettingData` 全字段破译（string-switch 反查法）
+
+> 上一章列出了 31 个 `Shared` 字段偏移，只确认了 4 个语义。
+> 本章用 **FNV-1a 哈希反查** 把 16 个字段全部解开，并修正了上一章的两个错误结论。
+
+---
+
+## 24. 破译方法：IL2CPP 的 string switch
+
+`ParseBattleSettings` @ `0x2BA1AE8`（1135 条指令）负责把
+`get_battlesettings.json` 的 `battlesettingsjson` 字典逐键写入 `BattleSettingData` 单例。
+IL2CPP 把握手编译成 **FNV-1a 哈希 + 二分比较**：
+
+`ComputeStringHash` @ `0x2917330`：
+
+```asm
+02917340  ldr   w8, [x0, #0x10]     ; 字符串长度
+02917344  mov   w20, #0x9dc5
+0291734C  movk  w20, #0x811c, lsl #16   ; w20 = 0x811C9DC5  (FNV offset basis)
+02917358  mov   w22, #0x193
+02917360  movk  w22, #0x100, lsl #16    ; w22 = 0x01000193  (FNV prime)
+02917370  bl    #0x44d2e54               ; 取第 i 个 char
+02917374  and   w9, w0, #0xffff
+02917380  eor   w9, w20, w9
+02917384  mul   w20, w9, w22            ; h = (h ^ c) * prime
+```
+
+标准 **FNV-1a 32 位**。于是可以反推：
+
+```python
+def fnv1a(s):
+    h = 0x811C9DC5
+    for ch in s:
+        h = ((h ^ (ord(ch) & 0xffff)) * 0x01000193) & 0xFFFFFFFF
+    return h
+```
+
+`ParseBattleSettings` 里每个键都是这个形状：
+
+```asm
+02BA1E3C  mov    w8, #0x2b30
+02BA1E40  movk   w8, #0xe1, lsl #16     ; w8 = 0x00E12B30
+02BA1E44  cmp    w0, w8
+02BA1E48  b.eq   #0x2ba2318             ; -> 写 [x21,#0x58]
+```
+
+把分支目标处的 `str s0,[x21,#imm]` 与 JSON 键名的 FNV-1a 值对上，
+就得到「偏移 ↔ 键名」的完整映射。
+
+---
+
+## 25. 完整字段表（16 个已破译）
+
+| 偏移 | JSON 键名 | 值 | FNV-1a 哈希 | 写入点 |
+|---|---|---|---|---|
+| `+0x1C` | `hero_followup_distance` | — | `0x29A90A48` | `0x2BA27B4` |
+| `+0x28` | `battle_thema_fadeout_time` | 2 | `0xAE69B7AC` | `0x2BA2598` |
+| `+0x2C` | `DEF_UPPER_BOUND` | **100** | `0x4EBE56F4` | `0x2BA2454` |
+| `+0x30` | `DEF_INCR_RATIO` | **0.0034** | `0xE01B0147` | `0x2BA24C0` |
+| `+0x40` | `ATKSPD_CAP` | **2.5** | `0x80270D7D` | `0x2BA26DC` |
+| `+0x44` | `GREY_DAMAGE_FONT` | 0.5 | `0xE5683D66` | `0x2BA27B4` |
+| `+0x44` | `SR_DMG_REVISE` | 0.8 | `0xD4CC0918` | `0x2BA27B4`（共用分支） |
+| `+0x48` | `SR_HP_REVISE` | 5 | `0xEA233DFA` | `0x2BA28F8` |
+| `+0x4C` | `SR_DEF_REVISE` | 1 | `0xEC9EF7FD` | `0x2BA2670` |
+| `+0x50` | **`CRIT_PROB_CAP`** | — | `0xA894280E` | `0x2BA288C` |
+| `+0x58` | `HITRATE_MIN_CAP` | **0.05** | `0x00E12B30` | `0x2BA237C` |
+| `+0x5C` | `HITRATE_MAX_CAP` | **0.95** | `0x2EEE1122` | `0x2BA252C` |
+| `+0x64` | `battle_vfx_pooling_count` | — | `0x5851F3F1` | `0x2BA2748` |
+| `+0x64` | **`ATKSPD_LOWER_CAP`** | **1.0** | `0x44DF08AF` | `0x2BA2748`（共用分支） |
+| `+0x68` | `MOTION_MIN_CAP` | — | `0x5ED5E1CF` | `0x2BA2604` |
+| `+0x6C` | （未在 string-switch 中，见下） | 0.2 | — | `0x2BA21D8` |
+| `+0x70` | `barrier_refill_amount` | 0.1 | `0x5CCE18CE` | `0x2BA28F8` |
+
+### 两个重要修正
+
+**修正 1：`+0x64` 不是「攻速下限」，键名是 `ATKSPD_LOWER_CAP`**
+
+上一章把 `+0x64` 猜成「JSON 里没有对应键，构造函数写死」——**错了**。
+它确实来自 JSON，键名就是 `ATKSPD_LOWER_CAP`，与 `battle_vfx_pooling_count` 共用
+`0x2BA2748` 这个 `str` 指令（IL2CPP 的 switch 分支合并优化）。
+
+**修正 2：`+0x30` 确实存了 `DEF_INCR_RATIO`，但伤害公式不用它**
+
+这是本次最反直觉的发现：
+
+- `ParseBattleSettings` 的 `0xE01B0147` 分支（`DEF_INCR_RATIO`）把值写进 **`[x21,#0x30]`**
+- 但减伤函数 `0x2936288` 读的是 **`0xE49F6C` 处的编译期常量 294.117647**，
+  从不读 `[Shared+0x30]`
+
+**结论：`DEF_INCR_RATIO` 被解析、被存储，但伤害公式已把它硬编码。**
+改 JSON 里的这个键，减伤数值不会变（但可能影响别处，比如 UI 显示或结算预估）。
+
+---
+
+## 26. 新增发现：`CRIT_PROB_CAP`
+
+`+0x50` 的键名是 **`CRIT_PROB_CAP`** —— 暴击率上限。
+上一章反汇编 `ApplyStatic` 时，暴击率比较是：
+
+```asm
+0295AE40  fcmp  s0, s11              ; 掷骰 vs 暴击率
+0295AE44  b.ge  #0x295b078           ; 不暴击
+```
+
+**比较之前没有 clamp** —— 说明 `s11`（暴击率）在别处已经被钳过，
+钳制点就是 `CRIT_PROB_CAP`（`[Shared+0x50]`）。这是一个待补的定位项。
+
+---
+
+## 27. 完整伤害公式（三次修正后的最终版）
+
+```c
+// ── 1. 命中 ────────────────────────────────────────────
+// BattleEffectDamage.ApplyStatic @0x295A850
+hitRate = clamp(1.0f + atkHit + atkHitExtra - defEva - defEvaExtra,
+                Shared->HITRATE_MIN_CAP,      // +0x58 = 0.05
+                Shared->HITRATE_MAX_CAP);     // +0x5C = 0.95
+if (Random.Range(0,1) >= hitRate) return MISS;
+
+// ── 2. 暴击 ────────────────────────────────────────────
+// BattleEffectDamage.get_CriticalRatio @0x295A268
+critRate = attacker->baseCritRate + effect->extraCritRate;
+// 上限 Shared->CRIT_PROB_CAP (+0x50)，钳制点待补
+
+critRate = min(critRate, Shared->CRIT_PROB_CAP);
+
+if (Random.Range(0,1) < critRate) {
+    // get_CriticalPower @0x295A288 + 0x295AE6C
+    dmg *= (attacker->baseCritDmg + defender->critDmgResist + 1.0f);
+}
+
+// ── 3. 上下限 ──────────────────────────────────────────
+// BattleEffectDamage.GetDamageAmount @0x295BB80
+dmg = fabsf(dmg * hitCount * baseStatFactor);
+dmg = min(dmg, upperBound);           // 默认 0x7f7fffff (FLT_MAX)
+dmg = (dmg < lowerBound) ? lowerBound : dmg;
+
+// ── 4. 减伤 ────────────────────────────────────────────
+// BattleUnit.HandleDamage @0x291DF2C
+float eff;
+switch (dmgType) {
+  case 1: eff = target->Defense - penetrateDef; break;
+  case 2: eff = target->Resist  - penetrateRst; break;
+  case 3: case 4: goto noReduce;              break;
+}
+// 0x2936288 —— 注意：这里用的是硬编码 294.117647，不是 Shared->DEF_INCR_RATIO
+float mult = (eff <= 0.0f) ? 1.0f : (294.117647f / (eff + 294.117647f));
+dmg *= mult;
+
+noReduce:
+// 减免率累积 0x291EE58
+float keep = 1.0f - accumulateReduceRate();
+
+// ── 5. 地板 + 收尾 ─────────────────────────────────────
+dmg = dmg * max(Shared->DAMAGE_DECREASE_MIN_CAP, keep);  // +0x6C = 0.2
+dmg = max(0.0f, dmg);                                     // 0x291F2C4
+if (dmgType != 4) {
+    dmg = f(dmg, GetDistance() / 80.0f);                  // 0x291F3B0
+}
+
+// ── 6. 扣血 ────────────────────────────────────────────
+// BattleUnit.BlowDamage @0x291F948
+target->HP -= dmg;
+attacker->Heal(dmg * attacker->VampRate);                 // get_VampRate @0x29191DC
+```
+
+---
+
+## 28. 完整地址索引（三次追加汇总）
+
+### 伤害主链
+
+| 函数 | 模块内偏移 |
+|---|---|
+| `BattleEffectDamage.ApplyStatic` | `0x295A850` |
+| `BattleEffectDamage.GetDamageAmount` | `0x295BB80` |
+| `BattleUnit.HandleDamage` | `0x291DF2C` |
+| `BattleUnit.BlowDamage` | `0x291F948` |
+| 防御/抗性→伤害倍率 | `0x2936288` |
+| `Random.Range`（float） | `0x293728C` |
+
+### 属性取值
+
+| 函数 | 模块内偏移 |
+|---|---|
+| `BattleUnit.get_Defense` | `0x2918D1C` |
+| `BattleUnit.get_Resist` | `0x2918E4C` |
+| `BattleUnit.get_PrimaryAttackPerSec` | `0x29187A4` |
+| `BattleUnit.get_PureCriticalRate` | `0x2919040` |
+| `BattleUnit.get_CriticalPower` | `0x29190AC` |
+| `BattleUnit.get_PureCriticalPower` | `0x2919170` |
+| `BattleUnit.get_VampRate` | `0x29191DC` |
+| `BattleUnit.get_HitRate` | `0x2919728` |
+| `BattleUnit.GetCurrentStateSnapshot` | `0x291C3B4` |
+| `BattleUnitStateSnapshot..ctor` | `0x293E36C` |
+
+### `BattleEffectDamage` 全类
+
+| 方法 | 偏移 |
+|---|---|
+| `get_CriticalRatio` | `0x295A268` |
+| `get_CriticalPower` | `0x295A288` |
+| `get_Penetrate` | `0x295A2A8` |
+| `get_AdditionalCritialPower` | `0x295A300` |
+| `get_HitRate` | `0x295A310` |
+| `.ctor` | `0x295A3F8` |
+| `Init` | `0x295A50C` |
+| `SetHitMissCheckFlag` | `0x295A7E0` |
+| `ContextSetupComplete` | `0x295A7F0` |
+| **`ApplyStatic`** | **`0x295A850`** |
+| `GetAdditionalFactor` | `0x295B808` |
+| `GetDamageAmount` | `0x295BB80` |
+| `UpdateDamageAmount` | `0x295BD0C` |
+| `SetCriticalLogicOption` | `0x295BD14` |
+| `UpdateSnapshot` | `0x295BD1C` |
+| `SetExtraCriticalPower` | `0x295BD60` |
+
+### `BattleSettingData` 解析链
+
+| 方法 | 偏移 |
+|---|---|
+| `get_Shared` | `0x2B9FDB4` |
+| `.ctor` | `0x2B9FE38` |
+| `ParseBattleSettings` | `0x2BA1AE8` |
+| `ParseChampionStatMultiplySettings` | `0x2BA2CA4` |
+| `ParseChampionStatSettings` | `0x2BA3320` |
+| `ParseMultiplaySetting` | `0x2BA3BF4` |
+| `ParsePvPSettings` | `0x2BA4138` |
+| `ParsePvpStatSettings` | `0x2BA52B4` |
+| `ParseRPvPSettings` | `0x2BA5C20` |
+| `ParseStrikerSettings` | `0x2BA6CFC` |
+| `ParseWorldruleChainCombo` | `0x2BA6EFC` |
+| `ParseMirrorSetting` | `0x2BA7E24` |
+| `ParseAutoPvPSetting` | `0x2BA8244` |
+| `ParseAutoBattleAvailable` | `0x2BA8320` |
+| `ParseRepeatBattleAvailable` | `0x2BA8628` |
+| `ComputeStringHash`（FNV-1a 32） | `0x2917330` |
+
+### 常量位置
+
+| 常量 | 位置 | 值 |
+|---|---|---|
+| `1/DEF_INCR_RATIO` | 文件偏移 `0xE49F6C` | 294.117645264 |
+| 距离衰减 | 立即数 | 80.0f (`0x42a00000`) |
+| `FLT_MAX` 哨兵 | 立即数 | `0x7f7fffff` |
+| `DAMAGE_DECREASE_MIN_CAP` | `Shared+0x6C` | 0.2 |
+| `HITRATE_MIN_CAP` | `Shared+0x58` | 0.05 |
+| `HITRATE_MAX_CAP` | `Shared+0x5C` | 0.95 |
+| `ATKSPD_CAP` | `Shared+0x40` | 2.5 |
+| `ATKSPD_LOWER_CAP` | `Shared+0x64` | 1.0 |
+| `CRIT_PROB_CAP` | `Shared+0x50` | 待读 |
+| `DEF_UPPER_BOUND` | `Shared+0x2C` | 100 |
+| `DEF_INCR_RATIO` | `Shared+0x30` | 0.0034（**伤害公式不读**） |
+
+---
+
+## 29. 待办
+
+- [ ] `CRIT_PROB_CAP`（`Shared+0x50`）的实际值与钳制点定位
+- [ ] `DAMAGE_REDUCED 0.1` 的接入点（疑似 `+0x44` 的 `GREY_DAMAGE_FONT` 混淆，需复核）
+- [ ] `LEADER_BLOCK_RATIO 1.75` 的队长块倍率（`get_LeaderBlockRatio` 在 `0x2BA061C`）
+- [ ] PVP 的 `Damage_revise 0.6` / `HP_revise 1.75`（`ParsePvPSettings` @`0x2BA4138` 可解）
+- [ ] `sr` 相关的 `SR_DMG_REVISE 0.8` / `SR_HP_REVISE 5` / `SR_DEF_REVISE 1` 作用对象
+- [ ] `w24 == 3` 的确切语义
+- [ ] `MOTION_MIN_CAP` 的作用（移速下限？）
