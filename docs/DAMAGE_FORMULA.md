@@ -306,7 +306,104 @@ GOLD_max_power    = 544,835.5
 
 ---
 
-## 九、未解决的问题
+## 九、`value.target` 的完整语义
+
+`addstate` 里 `handler.id` 与 `value.target` 是**两个独立维度**：
+
+- `handler.id` 决定**做什么**（造成伤害 / 加 buff / 治疗 / 上护盾 …）
+- `value.target` 决定**取哪个属性当基数**
+
+136 种组合，高频如下：
+
+### 伤害类 handler 的基数选择
+
+| handler | value.target | 次数 | 含义 |
+|---|---|---|---|
+| `DmgMagic` | `AtkDmg` | 119 | 魔法伤害 = 攻击力 × value |
+| `DmgNormal` | `AtkDmg` | 110 | 物理伤害 = 攻击力 × value |
+| `DmgNeutral` | `AtkDmg` | 104 | 无属性伤害 = 攻击力 × value |
+| `ProjectileDmgNormal` | `AtkDmg` | 62 | 弹道物理伤害 |
+| `ProjectileDmgMagic` | `AtkDmg` | 38 | 弹道魔法伤害 |
+| `DmgNormal` | `HP` | 30 | 物理伤害 = 自身生命 × value（按血打人） |
+| `DmgNormal` | `Rst` | 24 | 物理伤害 = 抗性 × value |
+| `DmgNeutral` | `MAXHP` | 22 | 无属性伤害 = 生命上限 × value |
+| `DmgNormal` | `Def` | 15 | 物理伤害 = 防御 × value（反伤型） |
+| `DmgMagicMissCheck` | `AtkDmg` | 10 | 带命中判定的魔法伤害 |
+| `DmgBlockOver` | `MAXHP` | 40 | 溢出方块伤害，按生命上限 |
+
+> **重要**：伤害基数**不一定是攻击力**。约 15% 的伤害 handler 用 `HP` / `MAXHP` / `Def` / `Rst` 作基数，
+> 这解释了游戏里「按血量百分比造成伤害」的 boss 技能和「按防御反伤」的机制。
+
+### 属性修正 handler 的基数
+
+| handler | value.target | 次数 | 含义 |
+|---|---|---|---|
+| `AtkDmg` | `AtkDmg` | 439 | 攻击力百分比修正 |
+| `Def` | `Def` | 182 | 防御百分比修正 |
+| `Rst` | `Rst` | 179 | 抗性百分比修正 |
+| `HP` | `HP` | 171 | 生命百分比修正 |
+| `PENETRATE_RST` | `PENETRATE_RST` | 55 | 抗性穿透修正 |
+| `PENETRATE_DEF` | `PENETRATE_DEF` | 49 | 防御穿透修正 |
+| `AtkDmg` | `BaseAtkDmg` | 36 | 修正**基础**攻击力（不含装备加成） |
+| `Def` | `BaseDef` | 25 | 修正基础防御 |
+| `Rst` | `BaseRst` | 28 | 修正基础抗性 |
+| `AtkSpd` | `AtkSpd` | 28 | 攻速修正 |
+| `CRIT_PROB` | `BaseCRIT_PROB` | 8 | 修正基础暴击率 |
+| `MoveSpeed` | `MoveSpeed` | 11 | 移速修正 |
+
+`Base*` 前缀的意义：`BaseAtkDmg` 只改「角色基础攻击」，装备/词条加成不受影响。
+这是区分「基础属性 buff」与「最终属性 buff」的关键字段。
+
+### `value.target` 全部 37 种取值
+
+```
+AtkDmg(1118)  HP(305)  Rst(263)  Def(262)  MAXHP(213)
+PENETRATE_RST(59)  CurrentHPRatio(54)  PENETRATE_DEF(50)
+BaseAtkDmg(38)  BaseRst(30)  AtkSpd(28)  BaseDef(25)
+CurrentHP(18)  MoveSpeed(12)  CRIT_PROB(11)  Barrier(8)
+BaseCRIT_PROB(8)  BaseCRIT_DMG(8)  CRIT_DMG(4)  ATK_SPD(3)
+DealtHP(3)  CRIT_DODGE(3)  DEF(3)  BasePENETRATE_DEF(3)
+BasePENETRATE_RST(3)  MaxHP(2)  DealtHPRatio(2)  MotionSpeed(2)
+rst(2)  DODGE(2)  CurrentHpRatio(1)  RESIST_KNOCKBACK(1)
+DmgImmune(1)  HitRate(1)  RST(1)  HITRATE(1)  Dodge(1)
+RESIST_DEBUFF(1)
+```
+
+> 注意大小写不一致（`DEF`/`Def`、`MaxHP`/`MAXHP`、`CurrentHPRatio`/`CurrentHpRatio`）——
+> 这是游戏代码里字符串常量不统一造成的，解析时必须**大小写不敏感**，或穷举所有变体。
+
+### `target`（作用对象）枚举
+
+| 值 | 次数 | 含义 |
+|---|---|---|
+| `ONESELF` | 21065 | 自己 |
+| `ENEMY_ONHIT` | 2812 | 被击中的敌人 |
+| `ALLY` | 1205 | 全体友方 |
+| `ENEMY` | 979 | 全体敌人 |
+| `ON_HEAL` | 427 | 治疗时触发 |
+| `ALL` | 300 | 全体 |
+| `MASTER_ALLY` | 255 | 召唤者的友方 |
+| `LEADER` | 176 | 队长 |
+| `ENEMY_FRONT` | 117 | 前排敌人 |
+| `SUMMONED_CREATURES` | 84 | 召唤物 |
+| `MASTER_ENEMY` | 80 | 召唤者的敌人 |
+
+还有**数组形式**的复合选择器（罕见但重要）：
+
+```jsonc
+["ALLY", "MIN_HP_RATIO"]      // 友方中血量百分比最低者（24 次）
+["ENEMY", "MAX_HP"]           // 敌方中血量最高者（9 次）
+["ENEMY", "RANDOM"]           // 随机敌方（11 次）
+["ALLY", "MAX_BASE_HIT"]      // 友方中基础命中最高者（13 次）
+["ENEMY", "MOST_MAX_HP"]      // 敌方中生命上限最高者（3 次）
+```
+
+> 这类选目标逻辑是「智能辅助技能」的基础：奶妈自动选最残血的队友，
+> 刺客自动选血最厚的敌人。数据里通过数组声明，服务端按声明筛人。
+
+---
+
+## 十、未解决的问题
 
 | 问题 | 现状 |
 |---|---|
@@ -315,3 +412,7 @@ GOLD_max_power    = 544,835.5
 | 多段技能的每段倍率分配 | `skillhandlerjson` 里每段独立，但部分技能用 `power` 字段（仅 64 条） |
 | `DmgManipulate` 的 288 条用法 | 显然是伤害修改器，但语义（乘算/加算/替换）未定 |
 | `wound_block_damage_multiplier = 5` | 受伤方块的伤害是否为正常 5 倍，未验证 |
+| `DmgBlockOver` 的触发阈值 | 40 次以 `MAXHP` 为基数，但「溢出」的判定条件未知 |
+| `Barrier` 与 `DmgManipulate` 的叠加顺序 | 护盾先扣还是减伤先算，未验证 |
+| `DealtHP` / `DealtHPRatio` 累计口径 | 是单次伤害还是战斗累计，未验证 |
+| `power` 字段的语义 | 仅 3542/7998 条有值，且 3478 条为 0，可能是废弃字段 |

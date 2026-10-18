@@ -52,7 +52,9 @@ data/
 | 文档 | 内容 |
 |---|---|
 | [docs/FORMAT.md](docs/FORMAT.md) | `.bf1` 文件格式与完整解密流程 |
-| [docs/DAMAGE_FORMULA.md](docs/DAMAGE_FORMULA.md) | 伤害计算公式还原 |
+| [docs/DAMAGE_FORMULA.md](docs/DAMAGE_FORMULA.md) | 伤害计算公式还原 + `value.target` 语义 |
+| [docs/DROP_SYSTEM.md](docs/DROP_SYSTEM.md) | 掉落系统：关卡掉落、随机箱、扭蛋池、显式概率 |
+| [docs/SHOP_SYSTEM.md](docs/SHOP_SYSTEM.md) | 商店体系与购买校验逻辑 |
 | [docs/BATTLE_CONSTANTS.md](docs/BATTLE_CONSTANTS.md) | 战斗系统全部常数 |
 | [docs/ADDSTATE_HANDLERS.md](docs/ADDSTATE_HANDLERS.md) | 267 种状态 handler 目录 |
 | [docs/CHARACTER_STATS.md](docs/CHARACTER_STATS.md) | 角色属性系统 |
@@ -129,6 +131,32 @@ APK (base.apk + split_config.arm64_v8a.apk)
 | 3 | ×1.4 | 9 | ×8 |
 | 4 | ×1.7 | 13 | ×11 |
 | 5 | ×2.0 | 18 | ×14 |
+
+---
+
+## 主要发现摘要
+
+### 伤害系统
+
+- 技能伤害是**攻击力百分比**，不是固定值（`addstate.handler[].value` + `value.target`）
+- 伤害基数**不一定是攻击力**：136 种 `handler × value.target` 组合，约 15% 用 `HP`/`MAXHP`/`Def`/`Rst`
+- `Base*` 前缀（`BaseAtkDmg`/`BaseDef`/`BaseRst`）表示只改基础属性，装备加成不受影响
+- 防御减伤：`1 - Def × 0.0034`，最低保留 20% 伤害
+- 三项 `DEF`/`MAXHP` 类常数的组合已整理在 [docs/DAMAGE_FORMULA.md](docs/DAMAGE_FORMULA.md)
+
+### 掉落系统
+
+- `stage_reward` **不含任何概率字段**，只声明「能掉什么类别、什么等级区间」
+- 全套数据里**唯一带显式概率的表**是 `point_drop`（6 条，全部 50/50 二选一）
+- 箱式扭蛋（`box_gacha_list`，220 项）是唯一能精确反推概率的付费机制（`1/剩余数量`，抽走不放回）
+- 详见 [docs/DROP_SYSTEM.md](docs/DROP_SYSTEM.md)
+
+### 商店系统
+
+- 5 套独立商店，13 种活动代币
+- 购买校验 6 项：商品存在性 / 货币充足 / 限购次数 / 批量合法性 / 前置条件 / 扣费发放
+- `reset` 五档：`LIMIT`(175条，永久) / `MONTH`(31) / `WEEK`(27) / `NONE`(13) / `DAY`(6)
+- 详见 [docs/SHOP_SYSTEM.md](docs/SHOP_SYSTEM.md)
 
 ---
 
