@@ -458,7 +458,7 @@ adb pull /sdcard/x.png out.png
 
 ---
 
-## 8. 运行时资产加载实证：战斗到底读了哪些包
+## 8. 运行时资产加载实证：战斗到底读了哪些包（⚠️ 结论已被第 10 章修正）
 
 这一章回答前面一直悬着的「743 个骨骼动画服务哪块玩法」。方法是**在战斗进行中直接采样进程打开的 AssetBundle 文件描述符**，比看画面更硬。
 
@@ -535,7 +535,7 @@ spritecollection_allringcollection / _hammercollection
 4 倍最近邻放大后，同一画面里两名角色的**像素块尺寸完全一致**。若为透视下的 3D 网格，
 不同景深的纹素密度必然不同 → 支持"平面四边形 + 预畸变贴图"的结论。
 
-### 8.7 结论汇总（对本仓库前几章的修正）
+### 8.7 结论汇总（⚠️ 本条已被第 10 章推翻，见 10.4）
 
 | 原判断 | 修正后 |
 |---|---|
@@ -570,3 +570,66 @@ spritecollection_allringcollection / _hammercollection
 | `BattleUnitDefinition.GetUnitSkinTexture` | `0x2CDBD3C` |
 
 > `modoff` 转文件偏移见 `docs/DAMAGE_FORMULA_BINARY.md` 的段映射表（4 个 LOAD 段 delta 各不相同）。
+
+## 10. 决定性修正：玩家英雄走 fbx 3D，NPC/怪物走精灵图集
+
+第 8 章曾根据一次战斗采样得出「战斗不加载 `fbx_*`」，进而推断 3D 骨骼路径未使用。
+**那个采样是无效样本**——那一局上阵的是剧情 NPC，不是玩家英雄。补采样后结论反转。
+
+### 10.1 两组对照采样（同一个 pid 4129）
+
+| 场景 | 打开的资产包 |
+|---|---|
+| **A. 剧情关（NPC 上阵）** | `skin_npc_sister`、`spritecollection_allring/allcarvestone`、`sfx_*`、`skillprefabs_ep5_ep5_shield`、`legacybuildresource_textures` |
+| **B. 显示玩家英雄（城镇/房屋）** | **`fbx_pc@staff`**、**`pc_texture_hero_hero_005`**、**`pc_texture_hero_hero_041`**、**`pc_texture_hero_limited_summer`**、`pc_accessory_common`、`pc_accessory_wizard`、`skillprefabs_wizard_wizard_choideokpal`、`skillprefabs_wizard_wizard_loki`、`skillprefabs_wizard_wizard_prydwen`、`legacybuildresource_materials/textures` |
+
+采样命令：
+
+```bash
+adb shell "ls -l /proc/4129/fd | grep -o 'Assets/[^ ]*' | sed 's#Assets/##' | sort"
+```
+
+### 10.2 结论
+
+![玩家英雄实机（城镇/房屋）](anim/runtime_hero_fbx.png)
+
+
+- **玩家英雄 = `fbx_pc@<武器类型>` 3D 网格 + `pc_texture_hero_*` 贴图 + `pc_accessory_*` 配件 + `fbx_*` 里的骨骼 AnimationClip**
+  武器分型实测存在：`fbx_pc`、`fbx_pc@sword`、`fbx_pc@staff`、`fbx_pc@bow/gun/hammer/orb`
+- **NPC / 怪物 = `skin_*` 精灵图集**（`skin_mon_*` 59 个、`skin_npc_*` 15 个、`skin_object` 1 个），
+  这类包内是 21 张 256×256 贴图，每张内含「3×3 小头像 + 大立绘 + 零碎件」，材质无帧参数 → 属 cut-in / 立绘用途
+- `pc_texture_hero_*` 共 **77** 个、`pc_texture_costume_*` 共 **128** 个、`pc_accessory_*` 共 **31** 个
+
+### 10.3 元数据字面量佐证（`literals.json`，28,014 条）
+
+```
+Fbx/PC                        Fbx/PC/PC@BASE            Fbx/PC/PC@CUTSCENE
+Fbx/PC@SWORD/PC@SWORD         Fbx/PC@HAMMER/PC@HAMMER   Fbx/PC@ORB/AnimClip
+Fbx/NPC/NPC@BAKERY            Fbx/FISHING/MON@FISH      Fbx/FISHING/MON@FLOAT
+[FBXCharacterController] {0} {1} {2} {3}
+[CharacterPartsDefinition: Key={0} PositionMode={1} ReferenceNode={2} Offset={3} IsAnimationSync={4} ResourcePrefab={5} Texture={6} ActiveHouse={7}]
+[BundleFileInfo: bundleName={0}, bundleHash={1}, bundleCRC={2}, bundleX={3}]
+SpriteCollection/{0}/{0}      spritecollection/{0}/{1}
+SKIN/OBJECT/{0}               AnimationClip/EVENT/{0}
+ImageUtil: Cannot find sprite def from collection {0}, {1}
+```
+
+- `Fbx/PC@SWORD/PC@SWORD` 与磁盘上的 `fbx_pc@sword` 一一对应（`/` → `_`，小写）
+- **`[FBXCharacterController]` 类确实存在** → 3D 角色控制器是真实路径
+- **`CharacterPartsDefinition`** 有 `ResourcePrefab` / `Texture` / `PositionMode` / `IsAnimationSync` / `ActiveHouse` 字段
+  → 就是 `pc_accessory_*` 那套"纸娃娃配件"的数据结构，`ActiveHouse` 说明配件在房屋里可切换
+- `SpriteCollection/{0}/{0}` 是精灵图集的加载模板（两段同名）
+
+### 10.4 与前几章的最终一致性
+
+| 说法 | 状态 |
+|---|---|
+| 第 3–5 章：`fbx_pc*` 是角色骨骼资产（743 clip，刚性单骨骼，`ChaMesh_Resize` 四边形） | ✅ **成立**，玩家英雄走这条 |
+| 第 8 章：战斗不加载 fbx、单位是精灵 | ❌ **作废**（样本是 NPC 局）|
+| 第 9 章：`texture_wa_6_1` 是精灵图集、不需要 warp | ⚠️ **部分作废**：`texture_wa_6_1` 属 `pc_texture_hero_*`（3D 用的贴图），不是精灵图集；"轴对齐、不需要 warp"这一点仍成立 |
+| 4 倍放大的像素密度一致 → 2D 精灵 | ⚠️ 该判据**不能区分**正交相机的低模 + 像素贴图，与精灵同样成立 |
+
+**一句话**：这个游戏是 **3D 低模 + 像素贴图、正交相机**渲染玩家英雄，NPC 用 2D 立绘图集。
+
+---
+
