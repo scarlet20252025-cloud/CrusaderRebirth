@@ -458,6 +458,99 @@ adb pull /sdcard/x.png out.png
 
 ---
 
+## 9. 运行时资产加载实证：战斗到底读了哪些包
+
+这一章回答了前面一直悬着的「743 个骨骼动画服务哪块玩法」。方法是**在战斗进行中直接采样进程打开的 AssetBundle 文件描述符**，比看画面更硬。
+
+### 9.1 采样方法
+
+```bash
+# 战斗进行中（约 10 秒后仍在打）
+adb shell "ls -l /proc/4129/fd | grep -o 'Assets/[^ ]*' | sed 's#Assets/##' | sort"
+```
+
+### 9.2 战斗中的实际打开清单（两次采样一致，共 13 个包）
+
+```
+legacybuildresource_textures
+sfx_auction / sfx_etc_spell_a~d / sfx_etc_spell_e~h / sfx_meta
+skillprefabs_common_etc / skillprefabs_common_shieldfx / skillprefabs_ep5_ep5_shield
+skin_npc_sister                ← 单位贴图走 skin_*
+spritecollection_allaccessorycollection / _allcarvestonecollection
+spritecollection_allringcollection / _hammercollection
+```
+
+**filter 专查 `fbx_*` / `pc_texture_*`：命中 0**（仅 `skin_npc_sister` 命中 `skin_*`）。
+
+→ **结论：战斗表现层不读 `fbx_*`，也不读 `pc_texture_*`。** 之前把 3D 骨骼路径当成角色主渲染链是错的。
+
+### 9.3 单位贴图包的真实结构（`skin_npc_sister`，142,625 B）
+
+| 项 | 值 |
+|---|---|
+| objects | 48 |
+| Texture2D | **21**，全部 **256×256** |
+| Material | 23 |
+| Shader | 3 |
+| 命名 | `SC@texture_sis_0` … `SC@texture_sis_8`、`_s2`（Season 2）、`_e`（event）、`texture_jinsera` |
+
+`SC@` 前缀 = 由 SpriteCollection 导出。**包内没有 `tk2dSpriteCollectionData`，也没有任何网格** —— 只有贴图与材质。
+
+### 9.4 贴图内容：菱形 UV 岛 + 帧序列
+
+![单位皮肤图集](anim/unit_skin_atlas.png)
+
+四个样本（`texture_sis_1 / 4 / 5e / 7`，从左到右）都呈同一套版式：
+
+1. **角色半身/全身像被放在一个 45° 菱形 UV 岛里**（不是正放的矩形）
+2. **右上角另有一列 2×4 的小图帧序列**（同一个角色的连续动作帧）
+
+这解释了两件事：
+
+- 角色不是整体正的骷髅网格，而是**倾斜四边形 + 预畸变贴图**；菱形岛在 -45° 的四边形上才呈正像
+  → 之前用 `texture_wa_6_1` 渲染时人物看起来"斜着、拼版状"，原因就在这里
+- 小图帧序列说明**动作是靠换帧（flipbook）或 UV 缩放/偏移推进**，配合 `CQUnityAnimation` 的 float 曲线
+
+### 9.5 `legacybuildresource_animationclip` 的 45 个 clip 全是 UI/FX
+
+实测该包 45 个片段，没有一个叫 `attack1 / move / death`：
+
+| 类型 | 例 |
+|---|---|
+| BOSS UI | `Anim_BossUI` 3.5s@60fps、`Anim_BossUI_cn`、`Anim_BossText_cn` |
+| 过场 CUTIN | `CUTIN_REMY` 1.0s、`CUTIN_META` 1.0s |
+| UI 动效 | `anim_ui_icon_expup_01`、`anim_ui_magnigl`、`anim_ui_champ_sell_fx_move/dropbox`、`Anim_UI_Library_BlackHole` 3.0s |
+| VS 演出 | `anim_Vs` / `anim_Vs_cn` 1.4167s |
+| 武器/升级 | `Anim_Weapon` 3.0s、`anim_weapon_upgrade` 系列、`anim_weapon_pc_idle` |
+| 特效 | `fx_CHAMP_NETH_MEKA_lazer_max_retake` 4.5s、`fx_sis_sea_tinkle`、`anim_christmas_tree_lv1/lv2` |
+| 其他 | `witch_end` 3.3333s、`anim_overState_Fruit` 2.875s（12 条 float 曲线）、`Anim_HiddenUI`（7 条 float 曲线）|
+
+→ `CQUnityAnimation` 确实是**真实在跑的播放器**（该包在 fd 里常驻），但它的服务对象是
+**UI / 过场 / 特效 / 演出**，不是战斗单位。
+
+### 9.6 像素级判据（旁证）
+
+![战斗单位 4 倍放大](anim/zoom_fight_4x.png)
+
+4 倍最近邻放大后，同一画面里两名角色的**像素块尺寸完全一致**。若为透视下的 3D 网格，
+不同景深的纹素密度必然不同 → 支持"平面四边形 + 预畸变贴图"的结论。
+
+### 9.7 结论汇总（对本仓库前几章的修正）
+
+| 原判断 | 修正后 |
+|---|---|
+| 角色主渲染链 = `fbx_pc` + 743 骨骼 clip | ❌ 战斗/城镇均不加载 `fbx_*`；单位走 `skin_*` 贴图 + `spritecollection_*` |
+| `CQUnityAnimation` 驱动角色动作 | ⚠️ 播放器本身在跑，但驱动的是 UI/过场/特效，不是单位 |
+| 3D 软件蒙皮渲染复现了游戏画面 | ⚠️ 属于**资产级还原**，游戏实际不这么渲染 |
+| `texture_wa_6_1` 是角色皮肤 | ✅ 仍然正确，但它是**精灵图集**（菱形 UV 岛），不是 UV 展开的角色贴图 |
+| 单位动作靠骨骼 | ❌ 靠换帧 / UV 变换，帧数据在 `skin_*` 的 256×256 图集里 |
+
+**下一步**：解析 `skin_*` 图集里的帧矩形（`Sprite`/`tk2dSpriteCollectionData.spriteDefinitions` 的 uvs+positions），
+配合 `AnimationClip` 的 float 曲线还原"第几帧 → 哪块 UV 岛"，即可**逐帧复现单位动作**——
+这才是能真正和实机对上的一条路。
+
+---
+
 ## 8. 地址速查
 
 | 用途 | 地址(modoff) |
