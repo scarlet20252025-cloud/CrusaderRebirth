@@ -897,6 +897,26 @@ death / attack1 / attack2 / critattack / statue_mode / blank`；列＝ clip 时�
 `critattack` 里角色明显前倾、左上肢大幅挥出 —— 对应 `arm_l` 旋转幅度 **166.0°**、`body` 33.8°、
 `leg_l` 102.2°（`idle` 同节点最大只有 71.0°/20.4°/19.4°）。曲线确实在驱动形变，不是静态图。
 
+**单帧取景还要再细分一层。** `_box_for_clip` 取的是整段 clip 的采样并集，对 `death` 这种
+「站立 → 倒地」的 clip 就失效了：角色倒地后缩在画面一角，四周全是空白。因此单帧走另一条路径
+`_box_at(clip, t)` —— 只采样**目标时刻这一帧**的蒙皮点，取 2%–98% 分位 + 6% pad。
+`shot.ps1 -Single` 且只有一个 clip 时自动切到它：
+
+```gdscript
+var box := _box_for_clip(c)
+if sheet_single_t >= 0.0 and nrows == 1:
+    box = _box_at(c, sheet_single_t)      # 单帧：只框当前姿态
+_frame_to(box)
+```
+
+八种姿态，各自独立取景（512×512）：
+
+![8 个姿态：idle / move / attack1 / attack2 / critattack / groggy / death / tada](anim/hero_cpu_poses.png)
+
+行序：`idle / move / attack1 / attack2`（上）、`critattack / groggy / death / tada`（下）。
+可见 `groggy` 是侧伏、`death` 是横卧、`tada` 是抬手展示，与 `idle` 的直立姿态明显不同 ——
+这套姿态差异全部来自那 17 根骨骼的局部旋转曲线，没有换贴图、没有换网格。
+
 ### 12.6 相机：全部正交，没有透视
 
 主场景包 `SKQUEST_extracted\base\assets\bin\Data\data.unity3d`（4,003,118 B）里 13 个相机：
