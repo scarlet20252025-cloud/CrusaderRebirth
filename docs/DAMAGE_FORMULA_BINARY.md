@@ -1209,3 +1209,273 @@ attacker->Heal(dmg * attacker->VampRate);                 // get_VampRate @0x291
 - [ ] `sr` 相关的 `SR_DMG_REVISE 0.8` / `SR_HP_REVISE 5` / `SR_DEF_REVISE 1` 作用对象
 - [ ] `w24 == 3` 的确切语义
 - [ ] `MOTION_MIN_CAP` 的作用（移速下限？）
+
+---
+
+# 追加四：PVP / 竞技场倍率的施加层级
+
+> 前面三章解的是 PvE 伤害。PvP 有一套独立的「修正值」体系，
+> 本章说明它们在哪一层施加、以及为什么「客户端改不了 PvP 平衡」。
+
+---
+
+## 30. PvP 修正的两个层级
+
+`get_battlesettings.json` 里有 4 组 PvP 配置：
+
+| 组 | 内容 | 用途 |
+|---|---|---|
+| `pvpsettings` | `Damage_revise 0.6`、`HP_revise 1.75`、`PVP_InitValue`、`power_base_*` 等 | 竞技场全局 |
+| `rpvpsettings` | `RPVP_InitValue{DmgRevise 0.3}` | 实时 PvP |
+| `pvpstatsettings` | `HP ×1.5`、`Def ×1.65`、`Rst ×1.65` | 竞技场属性倍率 |
+| `rpvpstatsettings` | `HP ×1.5`、`Def ×1.5`、`Rst ×1.5` | 实时 PvP 属性倍率 |
+
+---
+
+## 31. 属性倍率：`ParsePvpStatSettings` @ `0x2BA52B4`
+
+这四组的 `HP`/`Def`/`Rst` 都是 `{Fixed, Multiplier, Max}` 三元组结构，
+`ParsePvpStatSettings`（603 条指令）逐项解析。它的字段写入目标是
+`[Shared+0x90]` 起的**嵌套子对象**，而不是 `Shared` 本身。
+
+从 `ParsePvPSettings`（1119 条指令）的写入点可以确认嵌套层级：
+
+```asm
+02BA43E4  bl    #0x2b9fdb4          ; get_Shared -> x0
+02BA43EC  mov   x21, x0             ; x21 = Shared
+...
+02BA442C  str   s0, [x21, #0x90]    ; 写 Shared+0x90
+
+02BA499C  bl    #0x2b9fdb4          ; get_Shared -> x0
+02BA49A4  ldr   x8, [x0, #0xa8]     ; x8 = Shared->子对象
+02BA49AC  mov   w9, #1
+02BA49B0  strb  w9, [x8, #0x10]     ; 子对象+0x10 = 1（启用标志）
+02BA49BC  ldr   x8, [x21]           ; 重新取
+02BA49C0  ldr   x23, [x0, #0xa8]    ; x23 = Shared->子对象
+...
+02BA4A00  str   s0, [x23, #0x14]    ; 写 子对象+0x14
+```
+
+所以布局是：
+
+```
+BattleSettingData (Shared)
+├─ +0x2C  DEF_UPPER_BOUND
+├─ +0x30  DEF_INCR_RATIO
+├─ +0x40  ATKSPD_CAP
+├─ +0x50  CRIT_PROB_CAP
+├─ +0x58  HITRATE_MIN_CAP
+├─ +0x5C  HITRATE_MAX_CAP
+├─ +0x64  ATKSPD_LOWER_CAP
+├─ +0x6C  DAMAGE_DECREASE_MIN_CAP
+├─ +0x70  barrier_refill_amount
+├─ +0x90  PvP 全局修正（Damage_revise / HP_revise）
+│
+└─ +0xA8  →  PvP 子对象
+             ├─ +0x10  启用标志（bool）
+             ├─ +0x14  修正值 A（InitValue.DmgRevise）
+             ├─ +0x1C  修正值 B（InitValue.HealRevise）
+             ├─ +0x90  属性倍率 A
+             └─ +0x94  属性倍率 B
+```
+
+`+0x10` 那个 `strb w9,#1` 是「**该配置已加载**」的懒加载标记，
+说明 `ParsePvPSettings` 只在首次需要时执行一次。
+
+---
+
+## 32. 为什么客户端改不了 PvP 平衡
+
+关键在 `Damage_revise` 的施加位置：
+
+- PvE 的伤害链是 `ApplyStatic → HandleDamage → BlowDamage`
+- PvP 的 `DmgRevise 0.6` **不在** `HandleDamage` 里
+  （`HandleDamage` 的 1643 条指令中，只有 `[Shared+0x6C]` 一个 `Shared` 字段读取）
+
+也就是说 PvP 修正是**在更上层**（战斗管理器 / 结算器）对最终数值再乘一次，
+或者在**属性装配阶段**（`SetReviseStat` @`0x23C749C`）就把倍率烧进 `BattleUnit`。
+
+`SetReviseStat` 的名字直接点明了这一点 —— 它是「设置修正后的属性」，
+在单位进场时执行一次，之后 `HandleDamage` 读到的 `get_Defense` 已经是修正过的值。
+
+**这带来的玩法含义：**
+
+1. PvP 中 `HP ×1.5` 意味着「有效防御」也被放大，减伤公式的输出会非线性变化 ——
+   因为 `Def ×1.65` 与 `HP ×1.5` 各自独立乘，坦克在 PvP 里比 PvE 更耐打（高于 1.65/1.5 的比值）
+2. `DmgRevise 0.6` 是在减伤之后乘的，所以**减伤越高的目标，PvP 里越难打死**
+   （0.6 × 0.2 地板 = 12% 伤害，而 PvE 地板是 20%）
+3. `RPVP_InitValue.DmgRevise` 只有 **0.3**，实时 PvP 比竞技场更「磨」
+
+---
+
+## 33. `power` 评分体系
+
+`pvpsettings` 里有一整套 `power_*` 数值，用于匹配对手：
+
+```json
+"power_base_1": 3524,    "power_growth_1": 298.5,   "power_epic_1": 8412.5,
+"power_base_2": 5997,    "power_growth_2": 415.24,  "power_epic_2": 16887.5,
+"power_base_3": 13318,   "power_growth_3": 579.26,  "power_epic_3": 25331.25,
+"power_base_4": 29422,   "power_growth_4": 697.78,  "power_epic_4": 33775,
+"power_base_5": 57113,   "power_growth_5": 904.68,  "power_epic_5": 43775,
+"power_base_6": 106999,  "power_growth_6": 1020.85, "power_epic_6": 53775,
+                                                     "power_epic_7": 59106,
+                                                     "power_epic_8": 67550,
+"power_delta": 0.15,
+"BRONZE_max_power": 502773,
+"SILVER_max_power": 528010.5,
+"GOLD_max_power": 544835.5
+```
+
+- 6 个星级档位（`power_base_1..6` 逐档约 ×2）
+- 每档有独立的成长斜率 `power_growth_*`
+- EPIC 档位多出 2 级（`power_epic_7/8`）
+- 分数段上限：`BRONZE 502773 < SILVER 528010.5 < GOLD 544835.5`
+- `power_delta 0.15` = ±15% 匹配窗口
+
+这是**纯服务端**逻辑（客户端只用来显示），所以 `Damage_revise` 这类
+「影响公平性」的参数放在客户端只是镜像，实际校验在服务端。
+
+---
+
+## 34. 三章汇总：哪些数值改了会生效
+
+### 客户端可热更且影响伤害计算
+
+| 键 | `Shared` 偏移 | 影响 |
+|---|---|---|
+| `HITRATE_MIN_CAP` | `+0x58` | 命中率下限 |
+| `HITRATE_MAX_CAP` | `+0x5C` | 命中率上限 |
+| `ATKSPD_CAP` | `+0x40` | 攻速上限 |
+| `ATKSPD_LOWER_CAP` | `+0x64` | 攻速下限 |
+| `CRIT_PROB_CAP` | `+0x50` | 暴击率上限 |
+| `DAMAGE_DECREASE_MIN_CAP` | `+0x6C` | 伤害地板 |
+| `barrier_refill_amount` | `+0x70` | 护盾回充 |
+| `MOTION_MIN_CAP` | `+0x68` | 移动下限 |
+| `DEF_UPPER_BOUND` | `+0x2C` | 防御上限（非减伤用） |
+
+### 被解析但不被伤害公式读取
+
+| 键 | 存到 | 说明 |
+|---|---|---|
+| **`DEF_INCR_RATIO`** | `Shared+0x30` | **减伤公式用编译期常量 294.117647，不读此字段** |
+
+### 编译期硬编码，改 JSON 完全无效
+
+| 常量 | 位置 |
+|---|---|
+| `1/0.0034 = 294.117647` | 文件偏移 `0xE49F6C` |
+| 伤害上限默认 `FLT_MAX` | 立即数 `0x7f7fffff` |
+| 距离衰减 `80.0` | 立即数 `0x42a00000` |
+| 暴击基准 `+1.0` | `fmov s1,#1.0` @`0x295AE64` |
+| 命中基准 `+1.0` | `fmov s0,#1.0` @`0x295AD5C` |
+
+---
+
+## 35. 最终完整地址索引
+
+### 伤害主链
+
+| 函数 | 模块内偏移 |
+|---|---|
+| `BattleEffectDamage.ApplyStatic` | `0x295A850` |
+| `BattleEffectDamage.GetDamageAmount` | `0x295BB80` |
+| `BattleUnit.HandleDamage` | `0x291DF2C` |
+| `BattleUnit.BlowDamage` | `0x291F948` |
+| 防御/抗性→伤害倍率 | `0x2936288` |
+| `Random.Range`（float） | `0x293728C` |
+
+### 属性取值
+
+| 函数 | 模块内偏移 |
+|---|---|
+| `BattleUnit.get_Defense` | `0x2918D1C` |
+| `BattleUnit.get_Resist` | `0x2918E4C` |
+| `BattleUnit.get_PrimaryAttackPerSec` | `0x29187A4` |
+| `BattleUnit.get_PureCriticalRate` | `0x2919040` |
+| `BattleUnit.get_CriticalPower` | `0x29190AC` |
+| `BattleUnit.get_PureCriticalPower` | `0x2919170` |
+| `BattleUnit.get_VampRate` | `0x29191DC` |
+| `BattleUnit.get_HitRate` | `0x2919728` |
+| `BattleUnit.get_PureHitRate` | `0x29196BC` |
+| `BattleUnit.GetCurrentStateSnapshot` | `0x291C3B4` |
+| `BattleUnitStateSnapshot..ctor` | `0x293E36C` |
+
+### `BattleEffectDamage`（typeIndex 990，16 方法）
+
+| 方法 | 偏移 |
+|---|---|
+| `get_CriticalRatio` | `0x295A268` |
+| `get_CriticalPower` | `0x295A288` |
+| `get_Penetrate` | `0x295A2A8` |
+| `get_AdditionalCritialPower` | `0x295A300` |
+| `get_HitRate` | `0x295A310` |
+| `.ctor` | `0x295A3F8` |
+| `Init` | `0x295A50C` |
+| `SetHitMissCheckFlag` | `0x295A7E0` |
+| `ContextSetupComplete` | `0x295A7F0` |
+| `ApplyStatic` | `0x295A850` |
+| `GetAdditionalFactor` | `0x295B808` |
+| `GetDamageAmount` | `0x295BB80` |
+| `UpdateDamageAmount` | `0x295BD0C` |
+| `SetCriticalLogicOption` | `0x295BD14` |
+| `UpdateSnapshot` | `0x295BD1C` |
+| `SetExtraCriticalPower` | `0x295BD60` |
+
+### `BattleSettingData`（typeIndex 2382，46 方法）
+
+| 方法 | 偏移 |
+|---|---|
+| `get_Shared` | `0x2B9FDB4` |
+| `.ctor` | `0x2B9FE38` |
+| `get_LeaderBlockRatio` | `0x2BA061C` |
+| `get_DefenseBound` | `0x2BA05FC` |
+| `get_DefenseRate` | `0x2BA060C` |
+| `ParseBattleSettings` | `0x2BA1AE8` |
+| `ParseChampionStatMultiplySettings` | `0x2BA2CA4` |
+| `ParseChampionStatSettings` | `0x2BA3320` |
+| `ParseMultiplaySetting` | `0x2BA3BF4` |
+| `ParsePvPSettings` | `0x2BA4138` |
+| `ParsePvpStatSettings` | `0x2BA52B4` |
+| `ParseRPvPSettings` | `0x2BA5C20` |
+| `ParseStrikerSettings` | `0x2BA6CFC` |
+| `ParseWorldruleChainCombo` | `0x2BA6EFC` |
+| `ParseMirrorSetting` | `0x2BA7E24` |
+| `ParseAutoPvPSetting` | `0x2BA8244` |
+| `ParseAutoBattleAvailable` | `0x2BA8320` |
+| `ParseRepeatBattleAvailable` | `0x2BA8628` |
+| `ComputeStringHash`（FNV-1a 32） | `0x2917330` |
+
+### `BattleSettingData` 字段偏移（16 个已破译）
+
+| 偏移 | 键名 |
+|---|---|
+| `+0x1C` | `hero_followup_distance` |
+| `+0x28` | `battle_thema_fadeout_time` |
+| `+0x2C` | `DEF_UPPER_BOUND` |
+| `+0x30` | `DEF_INCR_RATIO` |
+| `+0x40` | `ATKSPD_CAP` |
+| `+0x44` | `GREY_DAMAGE_FONT` / `SR_DMG_REVISE` |
+| `+0x48` | `SR_HP_REVISE` |
+| `+0x4C` | `SR_DEF_REVISE` |
+| `+0x50` | `CRIT_PROB_CAP` |
+| `+0x58` | `HITRATE_MIN_CAP` |
+| `+0x5C` | `HITRATE_MAX_CAP` |
+| `+0x64` | `ATKSPD_LOWER_CAP` / `battle_vfx_pooling_count` |
+| `+0x68` | `MOTION_MIN_CAP` |
+| `+0x6C` | （未在 string-switch 中） |
+| `+0x70` | `barrier_refill_amount` |
+| `+0x90` | PvP 全局修正 |
+| `+0xA8` | PvP 子对象指针 |
+
+---
+
+## 36. 剩余待办
+
+- [ ] `CRIT_PROB_CAP` 的实际值（JSON 里没有，可能服务端下发）与钳制点
+- [ ] `DAMAGE_REDUCED 0.1` 的接入点
+- [ ] `LEADER_BLOCK_RATIO 1.75` —— `get_LeaderBlockRatio` @`0x2BA061C` 已定位，未反汇编
+- [ ] `SR_*_REVISE` 三个值的「SR」含义（可能是 Single Raid / Skill Ratio）
+- [ ] `MOTION_MIN_CAP` 作用对象（移速下限？）
+- [ ] `w24 == 3` 在 `HandleDamage` 中的确切语义
+- [ ] `SetReviseStat` @`0x23C749C` 的具体施加时机
