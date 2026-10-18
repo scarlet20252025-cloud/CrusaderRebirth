@@ -705,3 +705,27 @@ godot --path E:\DSH\cq\godot_cq --rendering-driver opengl3 --resolution 480x480 
 
 ---
 
+### 11.6 配件与「身体缺失」的澄清（实测）
+
+一开始以为角色只有头+半身是缺了配件，实测后否掉：
+
+| 包 | 实测内容 | 说明 |
+|---|---|---|
+| `pc_accessory_wizard` | 2182 Transform / 158 SkinnedMeshRenderer / 113 Mesh / 371 AnimationClip / 119 Texture2D | 全部巫师的配件库，非单套 |
+| `pc_accessory_common` | 4,271,749 B，696 Transform / 62 SMR / 71 Mesh / **1472 AnimationClip** | 主要是斗篷与挂件 |
+| 两者最大网格 | `MANTEAU`/`MANTEAU_64` **24–36 顶点**，`winston_mesh` 89、`Bird_Mesh` 76 | **没有任何"身体"网格** |
+
+结论：**角色身体不是网格，而是那张 `ChaMesh_Resize` 四边形上的整幅像素画**。
+`bodywidth`/`bodyheight` 缩放的就是这个四边形，`pc_accessory_*` 只是额外叠加的斗篷/帽子/挂件。
+
+同一网格换不同英雄贴图的对照（4×5 帧 `attack1`）：
+
+![同一网格 × 不同英雄贴图](anim/hero_texture_variants.png)
+
+- 上排：`texture_wi_6_5`（紫发，含手臂与下身）、`texture_wi_5_5`（粉发，仅头+半身）、`texture_wi_4_5`（绿发，含下身）
+- 下排：`texture_wi_1_5`（小个子全身）、`texture_wi_6_5_back_01/02`（纯色块，是背面挂件贴图，不该贴到主四边形上）
+
+**同一 mesh、不同贴图 → 完全不同的角色**，证明渲染路径正确，缺的只是"选哪张贴图"这一步
+（数据侧由 `get_character_visual.skin_tex` 决定，运行期由 `BattleUnitDefinition.GetUnitSkinTexture` 注入）。
+
+---
