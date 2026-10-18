@@ -390,9 +390,9 @@ python _re_work/render_anim2.py
 
 ---
 
-## 8. 实机运行时验证（最新）
+## 7. 实机运行时验证（最新）
 
-### 8.1 抓帧方法
+### 7.1 抓帧方法
 
 ```powershell
 adb shell screencap -p /sdcard/x.png
@@ -418,7 +418,7 @@ adb pull /sdcard/x.png out.png
 | 8 | `input tap 1579 969` | 开始 |
 | 9 | `input tap 1135 852` | 队伍锁定确认 |
 
-### 8.2 观察结论：表现层是像素精灵，不是 3D 网格
+### 7.2 观察结论：表现层是像素精灵，不是 3D 网格
 
 ![实机战斗](anim/runtime_battle.png)
 
@@ -434,7 +434,7 @@ adb pull /sdcard/x.png out.png
   → 3D 路径是**特例**，不是常态
 - `skin_tex` 前缀分布：`PC/Texture` **2222** / `SKIN/MON` **1227** / `SKIN/NPC` **102** / `SKIN/OBJECT` **73** / `SKIN/OBJECT/blank` **49**
 
-### 8.3 与自研渲染的对照
+### 7.3 与自研渲染的对照
 
 ![左：自研渲染　右：实机](anim/cmp_mine_vs_game.png)
 
@@ -445,7 +445,7 @@ adb pull /sdcard/x.png out.png
 - **但必须说清**：实机表现层是精灵，本文的 3D 渲染属于"**资产级还原**"，
   不等于"逐像素复现游戏画面"
 
-### 8.4 仍未定位：fbx 3D 路径的实际使用场景
+### 7.4 仍未定位：fbx 3D 路径的实际使用场景
 
 `fbx_pc`（159 clip）/ `fbx_pc@sword`（743 clip）的 3D 骨骼动画，
 在战斗（1 组阵容）与城镇场景中**均未观察到**。候选归宿（均未验证）：
@@ -458,7 +458,7 @@ adb pull /sdcard/x.png out.png
 
 ---
 
-## 7. 地址速查
+## 8. 地址速查
 
 | 用途 | 地址(modoff) |
 |---|---|
