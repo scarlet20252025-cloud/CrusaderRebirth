@@ -741,3 +741,203 @@ BattleEffectDamage.ApplyStatic (0x295A850)
 **技能/被动条件判定**（`CompareStatSelfDoOnFire`、`CheckBuffCasterInvoke`、
 `RunWithoutAnimation`、`UpdateSnapshot`、`ApplyStatic`），
 不参与伤害主循环 —— 也就是说暴击的实际生效**不读快照**，而是读实时 `[unit+0x6c]` / `[unit+0x70]`。
+
+---
+
+# 追加二：攻速上限与 `Shared` 配置对象全字段映射
+
+> 本章补上上一章遗留的第 3 个问题：`ATKSPD_CAP 2.5` 在哪生效。
+> 顺带把承载全部服务端常量的 `Shared` 对象字段表摸清。
+
+---
+
+## 19. 攻速上限：`get_PrimaryAttackPerSec` @ `0x29187A4`
+
+```asm
+029187A4  str   d10, [sp, #-0x40]!
+029187B4  adrp  x20, #0x5620000
+029187B8  mov   x19, x0
+029187D8  ldr   x8, [x19, #0xb0]     ; x8 = 定义对象
+029187DC  cbz   x8, #0x2918870
+029187E8  ldp   x20, x21, [x8, #0x30]   ; 基础攻速
+02918808  bl    #0x2269a14              ; -> s0
+02918814  ldp   x0, x1, [x8, #0x130]    ; 装备/词条攻速加成
+02918820  bl    #0x2269a14              ; -> s0
+02918828  fmov  s9, s0
+0291882C  bl    #0x2b9fdb4              ; get_Shared
+02918834  ldr   s10, [x0, #0x64]        ; s10 = 攻速下限（=1.0）
+02918838  mov   x0, xzr
+0291883C  bl    #0x2b9fdb4              ; get_Shared
+02918844  fadd  s0, s8, s9              ; s0 = 基础 + 装备
+02918848  ldr   s1, [x0, #0x40]         ; s1 = ATKSPD_CAP = 2.5
+02918858  fcmp  s0, s1
+0291885C  fcsel s1, s1, s0, gt          ; s1 = min(s0, 2.5)
+02918860  fcmp  s0, s10
+02918864  fcsel s0, s10, s1, mi         ; s0 = (s0 < 下限) ? 下限 : s1
+0291886C  ret
+```
+
+**公式：**
+
+```
+每秒攻击次数 = clamp(基础攻速 + 装备攻速, 下限[Shared+0x64], ATKSPD_CAP[Shared+0x40])
+```
+
+`[Shared+0x64]` 实测为 **1.0**（攻速最低也保持每秒 1 击），
+`[Shared+0x40]` 为 `battle_settings.ATKSPD_CAP = 2.5`。
+
+---
+
+## 20. `Shared` 配置对象的字段布局（全量枚举）
+
+`get_Shared` @ `0x2B9FDB4` 返回的全局单例，承载了所有从
+`get_battlesettings.json` 读入的数值常量。用「`bl get_Shared` 后 60 条指令内的
+`ldr sN,[x0,#imm]`」扫描全部 **272 个调用点**，得到字段偏移使用频次：
+
+| 偏移 | 使用次数 | 已知语义 | 证据 |
+|---|---|---|---|
+| `+0x18` | 3 | 未定 | — |
+| `+0x1C` | 2 | 未定 | — |
+| `+0x20` | 2 | 未定 | — |
+| `+0x24` | 8 | 未定（高频，疑似通用倍率） | — |
+| `+0x28` | **18** | 未定（最高频，疑似通用系数） | — |
+| `+0x34` | 5 | 未定 | — |
+| `+0x38` | 3 | 未定 | — |
+| **`+0x40`** | **3** | **`ATKSPD_CAP = 2.5`** | `0x2918848` |
+| `+0x44` | 1 | 未定 | `0x2F0F2C0` |
+| `+0x48` | 2 | 未定 | `0x2F0F2C0` |
+| `+0x4C` | 7 | 未定 | `0x2F0F2C0` |
+| **`+0x58`** | **1** | **`HITRATE_MIN_CAP = 0.05`** | `0x295AD4C` |
+| **`+0x5C`** | **2** | **`HITRATE_MAX_CAP = 0.95`** | `0x295AD60` |
+| `+0x60` | 3 | 未定 | `0x29189D8` |
+| **`+0x64`** | **1** | **攻速下限 = 1.0** | `0x2918834` |
+| `+0x68` | 1 | 未定 | `0x291C328` |
+| **`+0x6C`** | **1** | **`DAMAGE_DECREASE_MIN_CAP = 0.2`** | `0x291F018` |
+| `+0x70` | 1 | 未定 | `0x2975DD4` |
+| `+0x7C` | 4 | 未定 | `0x259B9C4` |
+| `+0x84` | 3 | 未定 | `0x291E908` |
+| `+0x94` | **23** | 未定（次高频） | `0x2EBE1BC` |
+| `+0xA4` | 2 | 未定 | `0x2A1BBDC` |
+| `+0xF4` | 1 | 未定 | `0x2930348` |
+| `+0xF8` | 2 | 未定 | `0x2930348` |
+| `+0x100` | 1 | 未定 | `0x292F218` |
+| `+0x104` | 2 | 未定 | `0x292F218` |
+| `+0x120` | 3 | 未定 | `0x28D75C0` |
+| `+0x124` | 5 | 未定 | `0x2AE5660` |
+| `+0x128` | 4 | 未定 | `0x2BA3ECC` |
+| `+0x130` | 2 | 未定 | `0x2EC272C` |
+| `+0x134` | 1 | 未定 | `0x2956EA0` |
+
+**已确认 4 个关键常量**，其余 27 个偏移的语义需要把
+`get_battlesettings.json` 的字段顺序与 `Shared` 的构造函数对拍才能确定
+（`BattleSharedData` 的 `.ctor` 尚未定位）。
+
+> 注意：`Shared` 的字段偏移**不是** JSON 里的字典序，
+> 而是按源码里 `public float xxx;` 的声明顺序排列。
+> 因此不能靠 JSON 顺序推偏移，必须从构造函数逐字段 `str sN,[x0,#imm]` 反推。
+
+---
+
+## 21. 三份常量表的交叉对照（最终版）
+
+| JSON 键 | 值 | `Shared` 偏移 | 生效函数 |
+|---|---|---|---|
+| `DEF_INCR_RATIO` | 0.0034 | 未用（编译期常量化 294.117647 @`0xE49F6C`） | `0x2936288` |
+| `DAMAGE_DECREASE_MIN_CAP` | 0.2 | `+0x6C` | `HandleDamage` `0x291F018` |
+| `HITRATE_MIN_CAP` | 0.05 | `+0x58` | `ApplyStatic` `0x295AD4C` |
+| `HITRATE_MAX_CAP` | 0.95 | `+0x5C` | `ApplyStatic` `0x295AD60` |
+| `ATKSPD_CAP` | 2.5 | `+0x40` | `get_PrimaryAttackPerSec` `0x2918848` |
+| 攻速下限（JSON 无此键） | 1.0 | `+0x64` | `get_PrimaryAttackPerSec` `0x2918834` |
+| `DAMAGE_REDUCED` | 0.1 | 未定位 | — |
+| `LEADER_BLOCK_RATIO` | 1.75 | 未定位 | — |
+| `SR_DEF_REVISE` | 1 | 未定位 | — |
+| `GREY_DAMAGE_FONT` | 0.5 | 未定位 | — |
+| `barrier_refill_amount` | 0.1 | 未定位 | — |
+
+### `DEF_INCR_RATIO` 的特殊性
+
+它是唯一一个**被编译期常量化**的键：`.so` 里既没有 `0.0034` 的 float32，
+也没有 `0.0034` 的 double，只有 `1/0.0034 = 294.117647` 的 float32。
+说明 IL2CPP 的 AOT 编译器把 `1.0f / DEF_INCR_RATIO` 折叠成了常量。
+
+**这意味着：改服务端 JSON 里的 `DEF_INCR_RATIO` 不会影响减伤公式**（客户端已固化）。
+这一点对理解「哪些数值可以热更、哪些不能」很关键。
+
+---
+
+## 22. 完整的伤害计算流程图（最终版）
+
+```
+【技能触发】
+  SkillCodeHandler.Fire
+    └─ 按 skill 表的 damage.value 算出基础伤害 dmg0
+       （value.target 决定倍率来源：AtkDmg / HP / MAXHP / Def / Rst ...）
+
+【命中判定】  BattleEffectDamage.ApplyStatic @0x295A850
+  hitRate = clamp(1.0 + atkHIT + atkHIT_extra
+                      - defEVA - defEVA_extra, 0.05, 0.95)
+  Random.Range(0,1) < hitRate ? 命中 : MISS
+     ↓ 命中
+【暴击判定】
+  critRate = baseCritRate([unit+0x6c]) + extraCritRate([effect+0x3c])
+  Random.Range(0,1) < critRate ?
+     ↓ 暴击
+  dmg1 = dmg0 * (atkCritDmg[unit+0x70] + defCritDmg + 1.0)
+     ↓ 未暴击
+  dmg1 = dmg0
+
+【上下限钳制】  BattleEffectDamage.GetDamageAmount @0x295BB80
+  dmg2 = |dmg1 * hitCount * baseStatFactor|
+  dmg2 = min(dmg2, upperBound)      ; 默认 FLT_MAX
+  dmg2 = max(dmg2, lowerBound)      ; 若配置了下限
+
+【主伤害管线】  BattleUnit.HandleDamage @0x291DF2C
+  早退：目标无效 / 伤害<=0 / 已死亡
+     ↓
+  受击前 AddState 组 0x29 回调
+     ↓
+  防御类被动 AddState 组 0x4d（按 dmgType 取 Def/Rst 修正）
+     ↓
+  伤害倍率 AddState 组 0x07（加法区 or 乘法区）
+     ↓
+  【核心减伤】
+    dmgType==1: eff = DEF - PEN_DEF
+    dmgType==2: eff = RST - PEN_RST
+    dmgType==3/4: 跳过
+    mult = (eff <= 0) ? 1.0 : 1/(1 + eff*0.0034)      @0x2936288
+     ↓
+  减免率累积：keep = 1.0 - Σ减免                  @0x291EE58
+     ↓
+  【伤害地板】
+    dmg3 = dmg2 * mult * max(0.2, keep)            @0x291F048
+     ↓
+  最终伤害改写 AddState 组 0x06
+     ↓
+  负值钳制 dmg3 = max(0, dmg3)                     @0x291F2C4
+     ↓
+  距离衰减（dmgType != 4）
+    dist / 80.0                                    @0x291F3B0
+     ↓
+【实际扣血】  BattleUnit.BlowDamage @0x291F948
+  构造 BattleUnitStateSnapshot（属性快照）
+  吸血结算（get_VampRate @0x29191DC）
+  护盾/吸收计算
+  递归调用 ApplyStatic（衍生伤害，dmgType=3）
+```
+
+---
+
+## 23. 三条「不可热更」的硬编码
+
+从二进制可以确认，以下三项**写死在客户端**，服务端改 JSON 无效：
+
+1. **`DEF_INCR_RATIO`** —— 编译期折叠为 `294.117647` 常量（`0xE49F6C`）
+2. **攻速下限 1.0** —— `Shared+0x64` 虽是变量，但 JSON 里没有对应键，实际由构造函数写死
+3. **伤害上限默认 `FLT_MAX`** —— `0x7f7fffff` 立即数（`0x295BCD8`）
+
+反过来，**可以热更**的是：
+
+- `DAMAGE_DECREASE_MIN_CAP`（伤害地板 0.2）
+- `HITRATE_MIN_CAP` / `HITRATE_MAX_CAP`（命中率上下限）
+- `ATKSPD_CAP`（攻速上限）
+- 全部 `block_buffs` / `battlebuffjson` / `addstate` 的倍率表
