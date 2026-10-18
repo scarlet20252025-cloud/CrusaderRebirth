@@ -53,6 +53,8 @@ data/
 |---|---|
 | [docs/FORMAT.md](docs/FORMAT.md) | `.bf1` 文件格式与完整解密流程 |
 | [docs/DAMAGE_FORMULA.md](docs/DAMAGE_FORMULA.md) | 伤害计算公式还原 + `value.target` 语义 |
+| [docs/DAMAGE_FORMULA_BINARY.md](docs/DAMAGE_FORMULA_BINARY.md) | **二进制级实证**：减伤/暴击/命中/攻速全部 ARM64 反汇编对照 |
+| [docs/ANIMATION_SYSTEM.md](docs/ANIMATION_SYSTEM.md) | **动画系统逆向 + 自研软件蒙皮渲染验证（含 GIF）** |
 | [docs/DROP_SYSTEM.md](docs/DROP_SYSTEM.md) | 掉落系统：关卡掉落、随机箱、扭蛋池、显式概率 |
 | [docs/SHOP_SYSTEM.md](docs/SHOP_SYSTEM.md) | 商店体系与购买校验逻辑 |
 | [docs/BATTLE_CONSTANTS.md](docs/BATTLE_CONSTANTS.md) | 战斗系统全部常数 |
