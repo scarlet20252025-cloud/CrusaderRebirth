@@ -1479,3 +1479,171 @@ BattleSettingData (Shared)
 - [ ] `MOTION_MIN_CAP` 作用对象（移速下限？）
 - [ ] `w24 == 3` 在 `HandleDamage` 中的确切语义
 - [ ] `SetReviseStat` @`0x23C749C` 的具体施加时机
+
+---
+
+# 追加五：`DEF_UPPER_BOUND` / `DEF_INCR_RATIO` 的真实用途（结案）
+
+> 第 2 章推测「`DEF_UPPER_BOUND` 不是给减伤公式用的」。
+> 本章用「`Shared` 字段读取点全扫」证实了这个推测，并给出它们的真实归属。
+
+---
+
+## 37. 方法：`get_Shared` 调用点 + 字段偏移联合扫描
+
+枚举全部 **272 个** `bl get_Shared`（`0x2B9FDB4`）调用点，
+对每个调用点后 70 条指令内扫描 `ldr sN,[xM,#<字段偏移>]`，
+再用「下一个函数起始地址」把读取点归到所属函数。
+
+---
+
+## 38. `DEF_UPPER_BOUND`（`Shared+0x2C`）的读取点
+
+| 读取地址 | 所在函数 | 函数起点 |
+|---|---|---|
+| `0x27BF66C` | `get_BlockSpawnPosition` | `0x27BF618` |
+| `0x27BF6DC` | （同函数分支） | `0x27BF6B0` |
+
+**全部 2 处都在「方块生成位置」计算里。**
+
+这意味着 `DEF_UPPER_BOUND = 100` 是**棋盘/方块布局参数**，
+不是伤害公式的防御上限。为什么叫 `DEF`？因为在这款游戏里
+「DEF」区块指棋盘上的防御型方块（`DEFENSIVE` 类型的 block），
+`DEF_UPPER_BOUND` 是防御方块在上边界的位置约束。
+
+> 这个命名混淆陷阱很典型：单看键名会以为是「防御值上限」，
+> 只有看调用点才能确认它属 UI/布局层。
+
+---
+
+## 39. `DEF_INCR_RATIO`（`Shared+0x30`）的读取点
+
+| 读取地址 | 所在函数 | 函数起点 |
+|---|---|---|
+| `0x27C16C0` | `GetBlockPosition` | `0x27C1654` |
+| `0x28D764C` | `MoveNext` | `0x28D747C` |
+
+**同样只有 2 处，且都在方块位置/移动协程里。**
+
+于是三条独立证据形成闭环：
+
+1. `ParseBattleSettings` 确实把 `DEF_INCR_RATIO` 写进 `Shared+0x30`
+2. 减伤函数 `0x2936288` 用的是 `0xE49F6C` 处的编译期常量 `294.117647`，从不读 `Shared+0x30`
+3. `Shared+0x30` 的唯二读取者在方块布局代码里
+
+**结论（确定性）：`DEF_INCR_RATIO` 在客户端只用于方块布局缩放，
+与伤害减伤完全无关。减伤系数 0.0034 是编译期烧死的。**
+
+这也解释了一个反直觉现象：服务端把 `DEF_INCR_RATIO` 从 0.0034 改成别的值，
+客户端伤害计算**不会变**，但方块视觉布局会变。
+
+---
+
+## 40. `LeaderBlockRatio`（`Shared+0x34`）
+
+`get_LeaderBlockRatio` @ `0x2BA061C` 是单指令 getter：
+
+```asm
+02BA061C  ldr   s0, [x0, #0x34]
+02BA0620  ret
+```
+
+读取点 3 处：
+
+| 读取地址 | 所在函数 | 用途 |
+|---|---|---|
+| `0x2921510` | `ShowDamageText` | 伤害数字显示缩放 |
+| `0x2B7B0CC` | `SetDPS` | DPS 统计 |
+| `0x2B7B0E0` | `SetDPS` | DPS 统计 |
+
+**全部在 UI/统计层**，不参与伤害数值计算。
+
+`LEADER_BLOCK_RATIO = 1.75` 的语义是「队长方块的视觉尺寸倍率」
+（1.75 倍大小），而不是「队长方块伤害 ×1.75」。
+
+> 又一次命名陷阱。如果想要「队长块伤害倍率」，得去 `block_buffs` 表里找
+> `AGGRESIVE` 的 `damage.multiplier`（1.1/1.2/1.4/1.7/2.0 五档）。
+
+---
+
+## 41. `Shared` 高频字段的归属（顺带结论）
+
+扫描还带出了几个高频字段的真实用途：
+
+| 偏移 | 读取次数 | 主要读取者 | 推断语义 |
+|---|---|---|---|
+| `+0x20` | 9 | `GetFollowMoveMultiplier`、`SetDPS`、`GetDifficulty` | 跟随移动倍率 |
+| `+0x24` | 8 | `AdvanceUnitMove`、`InterpolateUnitMove`、`GetUnitMoveDistance`、`HandleAnimationTimingEvent` | **单位移动速度/插值** |
+| `+0x28` | **22** | `UpdateIsFalling`、`get_BlockSpawnPosition`、`Co_ChangePhase`、`FlipData` | **重力/下落或翻转动画** |
+| `+0x38` | 2 | `SetActiveAutoSisterAndChampion` | 自动战斗相关 |
+| `+0x94` | 23 | 广泛分布 | 通用战斗参数（待定） |
+
+`+0x24` 与 `+0x28` 的读取点高度集中在**移动/物理**代码，
+它们不是伤害参数。这修正了第 20 章「`+0x28` 疑似通用系数」的猜测。
+
+---
+
+## 42. 五个追加章的总结论
+
+把这五章合起来看，得到一张「数值可信度」分层图：
+
+### 第一层：编译期硬编码（改 JSON 完全无效）
+
+| 常量 | 位置 | 值 |
+|---|---|---|
+| 减伤系数 | `0xE49F6C` | `294.117647` = 1/0.0034 |
+| 距离衰减 | 指令立即数 | `80.0` |
+| 暴击基准 | 指令立即数 | `+1.0` |
+| 命中基准 | 指令立即数 | `+1.0` |
+| 伤害上限默认 | 指令立即数 | `FLT_MAX` |
+
+### 第二层：从 JSON 读入且真正影响伤害
+
+| 键 | 偏移 | 影响 |
+|---|---|---|
+| `HITRATE_MIN_CAP` | `+0x58` | 命中率 5% 下限 |
+| `HITRATE_MAX_CAP` | `+0x5C` | 命中率 95% 上限 |
+| `DAMAGE_DECREASE_MIN_CAP` | `+0x6C` | 20% 伤害地板 |
+| `ATKSPD_CAP` | `+0x40` | 攻速 2.5 上限 |
+| `ATKSPD_LOWER_CAP` | `+0x64` | 攻速 1.0 下限 |
+| `CRIT_PROB_CAP` | `+0x50` | 暴击率上限 |
+| `barrier_refill_amount` | `+0x70` | 护盾回充 |
+
+### 第三层：从 JSON 读入但不影响伤害（命名陷阱区）
+
+| 键 | 偏移 | 实际用途 |
+|---|---|---|
+| **`DEF_INCR_RATIO`** | `+0x30` | **方块布局缩放**（不是减伤） |
+| **`DEF_UPPER_BOUND`** | `+0x2C` | **防御方块上边界位置**（不是防御上限） |
+| **`LEADER_BLOCK_RATIO`** | `+0x34` | **队长方块视觉尺寸**（不是伤害倍率） |
+| `MOTION_MIN_CAP` | `+0x68` | 移动动作下限 |
+| `SR_DMG_REVISE` / `SR_HP_REVISE` / `SR_DEF_REVISE` | `+0x44`/`+0x48`/`+0x4C` | 待定（疑似 Striker 相关） |
+
+### 第四层：纯服务端（客户端只有镜像）
+
+- `pvpsettings.*`（`Damage_revise 0.6` 等）
+- `power_base_*` / `power_growth_*` / `power_epic_*`
+- 扭蛋概率、掉落率、关卡奖励
+
+---
+
+## 43. 最终交付清单
+
+本文档共 **五个追加章**，累计记录了：
+
+- **18 个** 已验证的伤害相关公式
+- **40+ 个** 函数地址（模块内偏移）
+- **16 个** `BattleSettingData` 字段偏移及其 JSON 键名
+- **5 个** 编译期硬编码常量
+- **7 个** 命名陷阱的澄清
+
+配套工具（`E:\DSH\肥鱼乐园\_re_work\`）：
+
+| 脚本 | 用途 |
+|---|---|
+| `lib.py` | 反汇编基础库（vamap / fbound / 符号注释） |
+| `callers.py` / `callers2.py` | BL 指令全扫 + 调用者归属 |
+| `match.py` / `match2.py` | FNV-1a 哈希 ↔ JSON 键名反查 |
+| `shared2.py` | `Shared` 字段读取点扫描 |
+| `pbs.py` | `ParseBattleSettings` 字段写入点提取 |
+| `bd2.py` / `app2.py` | `BlowDamage` / `ApplyStatic` 浮点运算提取 |
