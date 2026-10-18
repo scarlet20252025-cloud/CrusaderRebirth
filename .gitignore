@@ -1,0 +1,27 @@
+# 原始加密数据（体积大，需要自行从客户端提取）
+*.bf1
+SKQUEST_datas/
+SKQUEST_extracted/
+SKQUEST_apk/
+
+# 中间产物
+SKQUEST_l1/
+_re_work/
+*.l1
+
+# 逆向中间文件
+libil2cpp.so
+libil2cpp_unpacked.so
+il2cpp_dec.bin
+global-metadata.dat
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

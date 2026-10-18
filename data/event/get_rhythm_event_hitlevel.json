@@ -1,0 +1,1 @@
+{"status": "success", "rhythm_event_hitlevel": [{"threshold": 50.0, "scorepercentage": 1.5, "recoverypoint": 0.2, "id": "Perfect"}, {"threshold": 150.0, "scorepercentage": 1.0, "recoverypoint": 0.1, "id": "Good"}]}
