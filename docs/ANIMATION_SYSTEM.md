@@ -1056,3 +1056,109 @@ powershell -File E:\DSH\cq\tools\shot.ps1 -Single -Clip critattack -Time 0.33 `
 | `shot.ps1` | 渲染 + base64 解码落盘 |
 
 ---
+
+## 13. Hermite 插值：曲线切线不可丢弃
+
+### 13.1 缺陷与修复
+
+Unity 的 `AnimationClip` 曲线是**三次 Hermite**，每段由前一个 key 的 `outSlope` 与后一个 key 的 `inSlope` 塑形：
+
+```
+p(u) = h00·p0 + h10·m0·span + h01·p1 + h11·m1·span
+h00 = 2u³−3u²+1   h10 = u³−2u²+u
+h01 = −2u³+3u²    h11 = u³−u²
+```
+
+早期 `export_hero_cpu.py` 只导出 `(time, value…)`，**丢掉了切线**，Godot 侧退化成线性插值。实测非零切线（`fbx_pc@staff`）：
+
+| clip | 路径 | 通道 | 首键 outSlope |
+|---|---|---|---|
+| `idle` | `root/body` | pos | (0, **−0.32328**, 0) |
+| `idle` | `root/body` | pos | 中键 inSlope (0, **2.95213**, 0) |
+| `attack1` | `root/body` | rot | (0, 0, **0.5577**, −0.08499) |
+| `move` | `root/body` | pos | (0, **91.48605**, 0) |
+
+`move` 的 91.49 说明位移段之间原本是急起急停，线性插值会把它抹成匀速滑动。
+
+修复后每个 key 变为 `[time, …value, …inSlope, …outSlope]`：rot 13 项、pos/scl 10 项。`hero_cpu.json` 从 186,571 B 增至 **392,161 B**。
+
+### 13.2 数值交叉验证（不依赖任何截图）
+
+用 Python 独立实现同一套 Hermite 求值，与 Godot 运行时的 `_samp()` 对同 40 个 (节点, 通道, 时间) 探针逐点比对：
+
+| 节点 | 通道 | 最大偏差 |
+|---|---|---|
+| body / arm_a / head / hair2 | pos | **0.00000000** |
+| body / arm_a / head / hair2 | rot | ≤ 0.00000009 |
+
+**WORST DIFF = 9e-08**。这说明动画数学在 Godot 侧与 Unity 语义一致，剩下的任何视觉差异都不来自插值。
+
+### 13.3 连续性判据（与实机视频对比）
+
+用户提供的实机录屏 `E:\录屏文件\bandicam 2026-10-18 22-50-17-377.mp4`（800×548, 30fps, 33.43s）里角色是**女侠客 泉奈**（`PC@SWORD` 体系，非 `PC@STAFF`），因此不能逐像素对齐；但运动统计可作判据。
+
+240 帧 idle 段（`E:\DSH\cq\idle30\`）：
+
+- 相对首帧变化像素 mean 8453.8（min 0 / max 10326）
+- **相邻帧变化 239/239 全部 >60 px（min 111, mean 1373.4）→ 无帧保持**
+
+本管线渲染 20 帧（0–0.95 s）相邻帧变化：LINEAR min 514 / mean 1033；HERMITE min 260 / mean 1060，**near-identical 0/19**。连续性成立。
+
+### 13.4 运动包络（关键量化结论）
+
+按区域分别统计视频里角色的包围盒变化：
+
+| 区域 | 宽度变化 | 高度变化 | 顶部 | 底部 |
+|---|---|---|---|---|
+| 整体 | 167..190 (**13.6%**) | 117..120 (**2.5%**) | 2 px | 1 px |
+| **身体** | 137..190 (**37.1%**) | 76..77 (**1.3%**) | **0 px** | 1 px |
+| 帽子（配件） | 161..168 (4.3%) | 41..43 (4.8%) | 2 px | 0 px |
+
+结论：游戏 idle 是**围绕固定脚底的横向重心摆动**——身体高度几乎不变（1.3%）、底部锁定（1 px）、宽度大幅变化（37%）；摆动主要来自身体，帽子只是跟随。
+
+本管线同口径渲染 `hero_cpu.json` 的 idle 20 帧：宽度 4.5%、高度 4.6%。差异来自**配件缺失**（无帽子/披风参与）与角色不同，而非插值错误（见 13.2 的 9e-08）。
+
+### 13.5 角色装配：`get_character_visual.json` 是权威表
+
+实机角色身上那些金翼、光环、武器光效，全部来自这张表，不是 fbx 网格的一部分。字段含义（3656 行，其中 HERO 1488）：
+
+| 字段 | 含义 | 例 |
+|---|---|---|
+| `skin_tex` | 贴图路径 → 包名 + 贴图名 | `PC/Texture/Hero/Hero_005/texture_wi_5_5` → `pc_texture_hero_hero_005` + `texture_wi_5_5` |
+| `parts` | 配件节点 ID 列表 | `["ACC_WI_5_10_HOOD","ACC_WI_5_10_BACK_FIRE"]` |
+| `bodywidth` / `bodyheight` | `ChaMesh_Resize` 四边形缩放 | 1.0 / 1.0（1488 个 HERO 全部为 1.0） |
+| `animationclipprefix` | clip 名前缀 | `carolyn_` → `carolyn_idle`（374 个 HERO 非空） |
+| `classid` | 决定用哪个 `fbx_pc@<weapon>` | `CLA_WIZARD` → `staff` |
+
+- 1488 个 HERO 中 **652 个有配件**（`parts` 非空），单件到多件不等：`CHA_AR_4_9` → `[ACC_AR_4_9_BACK, ACC_AR_4_9_HOOD]`，`CHA_WI_5_10` → `[ACC_WI_5_10_HOOD, ACC_WI_5_10_BACK_FIRE]`。
+- 职业 → 武器映射：`CLA_WARRIOR`→sword、`CLA_PALADIN`→hammer、`CLA_ARCHER`→bow、`CLA_HUNTER`→gun、`CLA_WIZARD`→staff、`CLA_PRIEST`→orb。
+- 已实现为 `E:\DSH\cq\tools\hero_parts.py`，可直接把 hero id 解析成 `{weapon, bundle, texture, parts, bodywidth, bodyheight}`。
+
+配件包实测规模：`pc_accessory_common` 4,271,749 B（62 SMR / 71 Mesh / **1472 clip** / 696 Transform），`pc_accessory_wizard` 2,389,799 B（158 SMR / 113 Mesh / 371 clip / 119 tex）。两者的最大网格只有几十个顶点（`MANTEAU` 24–36、`winston_mesh` 89、`Bird_Mesh` 76），**都不含身体网格**——再次印证身体是四边形上的整幅像素画。
+
+### 13.6 导出器已参数化（支持任意 `fbx_pc@*`）
+
+`export_hero_cpu.py` 不再硬编码 PID，改为结构发现：
+
+1. 找所有 `Transform` 里父节点不在集合内的**顶层根**，取名字以 `_GO` 结尾的那个（`PC@STAFF_GO` / `PC@SWORD_GO`）；
+2. 在该子树内找 `rootBone` 落在其中的 `SkinnedMeshRenderer` → 得到 Mesh、mesh 节点、17 骨；
+3. 找挂在同一子树下的 `Animation` 组件 → 它的 `m_Animations` 就是该角色的 14 个 clip。
+
+顶点流偏移也改为**结构化探测**：blendIndex 流是唯一「长度为 `m_VertexCount` 且所有值都 < 骨骼数」的 uint32 段，定位它之后 `uv = bidx − NV*8`、`pos = 0`。这样 `@sword`（1472 B 偏移）与 `@staff`（1464 B）都能正确解析，无需为每个角色写死常量。
+
+实测 `fbx_pc@sword`：874 objects / 58 Transform / 743 AnimationClip / 1 Mesh(73 v) / 2 SMR(17 骨) / 双根 `PC@SWORD` + `PC@SWORD_GO`，与 `@staff` 完全同构。导出 `hero_cpu_sword.json` 353,961 B，14 clip 全部成功。
+
+少量 clip 会丢弃 2–3 条轨道，全是 `root/body/accObject`、`root/body/temp`、`root/body/temp/joint1` —— 这三个是**配件挂点**（挂武器/装饰用），基础角色树上不存在，丢弃是正确的。
+
+### 13.7 本轮新增/修改的工具
+
+| 文件 | 作用 |
+|---|---|
+| `E:\DSH\cq\tools\export_hero_cpu.py` | 参数化导出器（`--src` / `--out`），含 Hermite 切线、结构化顶点流探测 |
+| `E:\DSH\cq\tools\hero_parts.py` | `get_character_visual.json` → 角色资产装配解析 |
+| `E:\DSH\cq\tools\export_texture.py` | 从 `pc_texture_*` 包导出 Texture2D 为 PNG |
+| `E:\DSH\cq\godot_cq\viewer_cpu.gd` | `_samp()` 改 Hermite；新增 `--model=` / `--verify` |
+| `E:\DSH\cq\tools\shot.ps1` | 新增 `-Model` 参数 |
+
+`--verify` 模式会把 `SAMP <node> <kind> <t> <values>` 打到 stdout，供与 Python 参考实现逐点比对（见 13.2）。
+
