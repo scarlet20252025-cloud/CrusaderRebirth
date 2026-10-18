@@ -729,3 +729,310 @@ godot --path E:\DSH\cq\godot_cq --rendering-driver opengl3 --resolution 480x480 
 （数据侧由 `get_character_visual.skin_tex` 决定，运行期由 `BattleUnitDefinition.GetUnitSkinTexture` 注入）。
 
 ---
+
+## 12. CPU 蒙皮管线（绕开 glTF 导入器）+ 相机与立绘渲染路径勘定
+
+第 11 章的 Godot 管线走的是「自写 `viewer3d.gd` 直接读 `hero_staff.json`」。本章记录两次失败后
+定型的方案，以及过程中查清的两件更重要的事：**游戏用的是什么相机**、**立绘到底怎么画的**。
+
+### 12.1 为什么放弃 glTF 路线
+
+先把 IBM 数学彻底做对（第 12.2 节），导出 `hero_staff.gltf`（29 nodes / 854 accessors / 14 animations /
+`append_from_file err=0`），但 Godot 的 glTF 导入器有三层结构性障碍：
+
+| 现象 | 实测报错 / 观察 |
+|---|---|
+| `MeshInstance3D.skin` 恒为 null | `skinnode=NONE`；把 mesh 节点从 `root` 的兄弟改为挂到 `root` 下、再改为挂到根骨骼 `body` 下，**三种拓扑都是 `skin=false`** |
+| 手工赋 `st.get_skins()[0]` 无效 | `GLTFSkin` 是 `Skin` 子类（不能声明 `var sk: Skin`）；`get_bind_count()` 不存在（`Invalid call. Nonexistent function 'get_bind_count' in base 'GLTFSkin'`）；赋值后仍是爆炸碎面 |
+| 手工按 IBM 重建 `Skin` 仍爆炸 | `set_bind_pose(i, ...)` 成功（bind_count=17），但导入器重建的 `Skeleton3D` **只含 17 个关节**，丢掉了 `root` / `weapon_L` / `weapon_L_temp` / `weapon_R` / `back_acc` / `hairsupporter_temp` / `L_eye` / `R_eye` / `followRoot` / `overhead` 这些**非关节但参与父链的中间节点**，骨骼 rest 变换与 IBM 不再匹配 |
+
+导入后的实际树形（对比原始双根结构，`root` 被折叠进 Skeleton3D）：
+
+```
+hero_staff → PC_STAFF_GO
+              ├─ ChaMesh_Resize
+              └─ root
+                  ├─ Skeleton3D[body,arm_l,arm_a,arm_r,"arm_a 1",cape,head,
+                  │             angry,cry,groggy,hair1,hair2,shout,sleepy,smile,leg_l,leg_r]
+                  │    ├─ weapon_L → weapon_L_temp
+                  │    ├─ weapon_R
+                  │    ├─ back_acc
+                  │    ├─ hairsupporter_temp
+                  │    └─ L_eye, R_eye
+                  ├─ followRoot
+                  └─ overhead
+              └─ AnimationPlayer
+```
+
+`weapon_R` 这类节点的父是 `arm_a 1`，而 `arm_a 1` 在 Skeleton3D 里；`followRoot` 却被提到 `root` 下。
+父链一旦被改写，任何依赖「按名字解析 path → 世界矩阵累乘」的蒙皮都不可能对。
+
+**结论：不走 glTF，改为把完整节点树 + 曲线 + 顶点数据一起导出，Godot 侧自己算。**
+
+### 12.2 蒙皮等式与 IBM（已数值闭环）
+
+Unity 侧（`dbg_ibm.py`，residual **2.55e-15**）：
+
+```
+mat_inv(boneWorldRest) * boneWorldRest == I
+```
+
+跨到 glTF 约定（`validate_gltf.py`，residual **7.02851e-07**）：
+
+```
+jointWorld(rest) * IBM[k] * v  ==  meshWorld * v
+IBM[k] = inverse(boneWorldRest_k) * meshWorld
+```
+
+**关键坑：`trs_mat` 的平移写错位置。** 原实现把平移写进 `out[3], out[7], out[11]`（row-major 位置），
+而 `mat_mul` / `mat_inv` 全程 column-major（平移必须在 `12,13,14`）。后果是所有世界矩阵平移全变 0
+→ IBM 全 0 → rest-pose 残差 7389.76。修好后 IBM 与 Unity `bindPose` **逐位相同**：
+
+```
+IBM[0] body  t=(8.141,  3.130, 22.292)
+IBM[1] head  t=(8.206, -11.156, 22.292)
+IBM[2] hair1 t=(-16.454,-45.056, 22.292)
+IBM[3] cape  t=(0.340,  -6.738, 22.292)
+```
+
+第二个坑：**`JOINTS_0` 声明 VEC4 但只写 2 字节**。每元素必须 8 字节，否则 Godot 报
+`The buffer view size was smaller than the minimum required size for the accessor` 与
+`Condition "joints_0.size() != 4 * vertex_num" is true`（`err=43`）。改 `struct.pack("<4H", bidx[i], 0, 0, 0)`
+后 bin 从 255,328 → 255,764 B。
+
+已排除的错误候选（勿重走）：
+
+| 候选式 | 残差 |
+|---|---|
+| `IBM = inverse(boneWorldRest)` 单用 | 22.29 量级（mesh 节点带旋转时错） |
+| `IBM = bindpose * inverse(meshWorld)` | 27,913.5 |
+| `IBM = inverse(boneWorldRest_in_meshspace)` | 22.29 |
+
+另：`lmat * IBM`（仅局部矩阵，不含父链）残差 56.16 是**正确**的，不要拿它当失败信号 —— 必须用整条父链。
+
+### 12.3 顶点流布局（第三个坑：UV 偏移少了 4 字节）
+
+Unity 把顶点流**依次紧排、每段 16 字节对齐**：
+
+| 流 | 内容 | 大小 | 起点 |
+|---|---|---|---|
+| stream0 | `position` float3 | 73 × 12 = 876 → 补齐 **880** | 0 |
+| stream1 | `uv0` float2 | 73 × 8 = 584 | **880** |
+| stream2 | `blendIndex` uint32 | 73 × 4 = 292 | **1464** |
+
+`m_DataSize` = 1764，876 + 584 + 292 = 1752，余 12 B 填充。
+
+原先按 `876` 读 UV —— 每个 texcoord 错位 2 个 float，表现是**贴图被撕成竖条纹**、alpha 裁剪失效。
+结构化定位（`locate_streams.py`）而非 bbox 猜测：
+
+```
+uint32 runs with all values < 17 (len>=70):
+  byte off 1464  distinct=17  first12=[0,0,0,0,0,0,1,1,1,1,1,2]  last8=[15,15,16,16,16,16,0,0]
+```
+
+`distinct=17` 且每 4 个一组 —— 既确认 blendIndex 在 1464，也再次印证**刚性单骨骼**（每顶点只绑 1 骨，
+`WEIGHTS_0 = (1,0,0,0)`）。
+
+### 12.4 最终管线
+
+`E:\DSH\cq\tools\export_hero_cpu.py` → `hero_cpu.json`（186,571 B）：
+
+```json
+{
+  "nodes":   [ {name, parent, t[3], r[4], s[3]} × 29 ],
+  "mesh":    { pos[73][3], uv[73][2], tris[37][3], bone[73] },
+  "bones":   [ 17 × nodeIdx ],
+  "bindpose":[ 17 × 16 (column-major) ],
+  "mesh_node": 1,
+  "clips":   [ {name, dur, tracks:[{node, pos?, rot?, scl?}]} × 14 ]
+}
+```
+
+- 单根：只保留 `PC@STAFF_GO`（pid `695172588252471095`），丢弃镜像的 `PC@STAFF`
+- `resolve(path)` 三级回退：直接命中 → `ALIAS` → 逐层删一个中间段再试
+  （解决 `root/body/followRoot` 这种 FBX 源里的陈旧路径；本 bundle 实际是 `root/followRoot`）
+- 14 个 clip **dropped=0**，全部曲线都落到真实节点上
+
+| clip | dur | tracks | clip | dur | tracks |
+|---|---|---|---|---|---|
+| idle_home | 1.0000 | 16 | ceremony | 2.2917 | 22 |
+| move_home | 1.0000 | 14 | death | 1.2500 | 22 |
+| idle | 1.0000 | 17 | attack1 | 0.7083 | 22 |
+| move | 0.4167 | 17 | attack2 | 0.7083 | 22 |
+| move_escape | 0.3750 | 22 | critattack | 0.8333 | 22 |
+| groggy | 1.3333 | 22 | statue_mode | 0.4167 | 22 |
+| tada | 0.7917 | 16 | blank | 0.0417 | 22 |
+
+时长与官方时序表 `additional_aniclip_PC@STAFF` 的 `ani` 段吻合
+（`attack1: 271-288` = 17/24 s ≈ 0.7083 s）。
+
+Godot 侧 `viewer_cpu.gd`：
+
+```gdscript
+vertex_world[i] = _world(bones[bone[i]]) * _bp(bone[i]) * Vector3(pos[i])
+```
+
+- `_local(i)`：按当前时间在 clip tracks 上二分查找，四元数走 `Quaternion.slerp`，向量走 `lerpf`
+- `_world(i)`：沿 `parent` 逐级累乘（节点树是完整的，没有丢中间节点）
+- `_bp(i)`：把 column-major 的 16 float 拆成 `Basis(bx, by, bz)` + `origin`
+- 正交相机 `Camera3D.PROJECTION_ORTHOGONAL`，`CULL_DISABLED`，`TEXTURE_FILTER_NEAREST`，
+  `TRANSPARENCY_ALPHA_SCISSOR(0.5)`
+
+### 12.5 14 个 clip 全览
+
+![14 clip × 5 帧（每行一个 clip，逐 clip 独立取景）](anim/hero_cpu_all_clips.png)
+
+行序：`idle_home / move_home / idle / move / move_escape / groggy / tada / ceremony /
+death / attack1 / attack2 / critattack / statue_mode / blank`；列＝ clip 时长的 0/20/40/60/80%。
+
+**取景必须逐 clip 独立算**：`move` / `move_escape` / `ceremony` 带根位移，用全局并集框会把其他 clip
+压到几十像素。改用每个 clip 自身采样点的 2%–98% 分位框（`_box_for_clip`）。
+
+单帧：
+
+| idle（t=0） | critattack（t=0.33） |
+|---|---|
+| ![idle](anim/hero_cpu_idle.png) | ![critattack](anim/hero_cpu_critattack.png) |
+
+`critattack` 里角色明显前倾、左上肢大幅挥出 —— 对应 `arm_l` 旋转幅度 **166.0°**、`body` 33.8°、
+`leg_l` 102.2°（`idle` 同节点最大只有 71.0°/20.4°/19.4°）。曲线确实在驱动形变，不是静态图。
+
+### 12.6 相机：全部正交，没有透视
+
+主场景包 `SKQUEST_extracted\base\assets\bin\Data\data.unity3d`（4,003,118 B）里 13 个相机：
+
+| 相机 | orthographic | orthographicSize |
+|---|---|---|
+| Main Camera | **True** | 320 |
+| Main Camera（另一套） | **True** | 180 / 5.0 |
+| tk2dCamera | **True** | 480 |
+| tk2DCamera | **True** | 180 |
+| UI Camera | **True** | 180 |
+| LetterBox | **True** | 320 |
+
+全部 `orthographic = True`，`field_of_view` 60 是透视模式的遗留字段，未生效。
+`ui_*` 104 个包里唯一的 `Camera` 组件在 `ui_bosssoulrush`（`BossSoulRushEntCodeCamera`，
+`ortho=False, fov=60`），是入场特效专用，不属于常规渲染。
+
+**所以「用 3D 相机实现」这个说法不成立**：游戏是一套正交投影，角色/立绘/UI 的差别只在于
+画在世界空间还是画进 uGUI Canvas。
+
+### 12.7 立绘不是 Spine（修正第 10 章的表述）
+
+第 10 章曾把立绘归到 `CQSpineAnimation`。全量核查后**否掉**：
+
+`ui_*` 104 个包（63,844,417 B）里 Spine 组件只出现 8 次：
+
+| 组件 | 次数 | 位置 |
+|---|---|---|
+| `SkeletonGraphic` | 2 | 仅 `ui_cq_next`（`SkeletonGraphic (medium-v2)`） |
+| `SkeletonAnimation` | 2 | 仅 `ui_totalwar`（`Spine GameObject (Cracktotalwar_crack_v001)`） |
+| `BoneFollower` | 4 | 同上 `ui_totalwar` |
+
+其余全是 tk2d 体系（`tk2dSlicedSprite` 22,112 / `tk2dSprite` 12,376 / `tk2dTextMesh` 10,914 /
+`tk2dUIItem` 6,601 …）。
+
+立绘的真实路径（`cutscene_core_sq_epilogue_end`，6,881,229 B）：
+
+```
+GameObject  _CQ_ILLUST_DAY_10TH_INGAME
+  ├─ MeshFilter   → Unity 内置 Quad（m_PathID == 0）
+  ├─ MeshRenderer → material（引用外部 cab）
+  └─ Texture2D    cq_illust_day_10th_ingame   1447 × 2048
+驱动：WellFired USSequencer 时间轴
+      （CutsceneUnit / USTimelineContainer / USTimelineEvent / USUnitAnimationEvent / CutsceneBackground）
+```
+
+即：**一张整幅大图贴在 Unity 内置 Quad 上，MeshRenderer 画进世界空间，正交相机拍摄，
+WellFired 时间轴驱动**。没有 Spine，也没有骨骼。
+
+### 12.8 一个取证陷阱：类名被抹掉的 `SkeletonGraphic`
+
+在 `global-metadata.dat` 里按字符串搜 `SkeletonGraphic` 返回**空命中**（`full.json` 里也没有同名 type）。
+它确实存在，只是类名被反 dump 保护抹掉了 —— 对应 `ti=17950`，`ns='Spine.Unity'`，`name=None`，
+`mc=76`。只能靠成员认出它：
+
+```
+fields:  skeletonDataAsset, initialSkinName, initialFlipY, startingAnimation, freeze,
+         updateMode, canvasRenderers, submeshGraphics, usedRenderersCount,
+         separatorSlotNames, baseTexture, OnMeshAndMaterialsUpdated,
+         currentInstructions, meshes, ...
+methods: MatchRectTransformWithBounds, EnsureCanvasRendererCount,
+         UpdateMeshMultipleCanvasRenderers, SyncSubmeshGraphicsWithCanvasRenderers,
+         OnCullStateChanged, ...
+```
+
+`MatchRectTransformWithBounds` + `canvasRenderers` + `submeshGraphics` 是 `SkeletonGraphic` 独有的指纹
+（它把 Spine 网格渲进 uGUI `CanvasRenderer`）。同批还有 `ti=17925/17975/18000/18025` 等多个 `name=None`
+的类型，都是同一保护造成的。
+
+**教训**：这份 metadata 里「按名字搜不到」不等于「不存在」，要按字段/方法指纹反查。
+
+### 12.9 本机 Godot 的两个硬限制（复现必读）
+
+1. **Godot 进程无法写任何文件**：`FileAccess` 写 `res://` / `user://` / `E:/DSH/cq/...` / `C:/Users/...`
+   一律 `err=12 (ERR_FILE_CANT_OPEN)`；`Image.save_png(绝对路径)` 同样。`--import` 编辑器模式也失败
+   （`Cannot create file 'res://.godot/imported/...'`、`Cannot save file 'editor_settings-4.7.tres'`）。
+   **同一个目录用 PowerShell 写完全正常** —— 是 Godot 进程被限制，不是权限配置问题。
+   → 唯一可行方案：场景把 PNG base64 打到 stdout，主机侧解码落盘：
+   ```gdscript
+   var buf := out.save_png_to_buffer()
+   print("SHOTB64_BEGIN")
+   print(Marshalls.raw_to_base64(buf))
+   print("SHOTB64_END")
+   ```
+2. **单帧 `get_viewport().get_texture()` 会卡死**：在 `_ready` 里 `await RenderingServer.frame_post_draw`
+   之后取图，实测挂起直到 60 s 看门狗（日志停在 `clip ... tracks=17` 之后）。
+   已验证可用的出图方式是**先 `_rebuild()` 再 `await frame_post_draw` 两次**的 contact-sheet 路径，
+   所以单帧也走这条路（`--clip=X --time=T` 内部转成 1×1 的 sheet）。
+
+GDScript 4.7 其它坑：`var x := <Variant>` 会触发
+`The variable type is being inferred from a Variant value`（**警告被当错误**），必须显式标注；
+脚本解析失败时窗口会永久挂起，必须加
+`get_tree().create_timer(40.0).timeout.connect(func(): get_tree().quit(2))` 看门狗。
+
+### 12.10 与「Live2D 式实现」的关系
+
+角色本质是一张整幅像素画贴在 **73 顶点 / 37 三角**的平面网格上（rest pose 全部落在 `z = 22.292`
+这一个平面），用 **17 根刚性骨骼**（每顶点 1 骨）做网格形变，正交相机拍摄，24 fps 帧量化
+（`CQUnityAnimation.InterpolateTime` 的 `frintp`）。这在数学上就是 Live2D 的「网格变形 + 骨骼驱动」，
+只是数据被塞进了 Unity 的 `SkinnedMeshRenderer`。
+
+因此本管线（12.4）产出的东西本身就是 Live2D 等价物；**不需要 Cubism**，也不需要重绑骨骼 ——
+重绑会丢掉游戏原生的 14 个 clip 与 `additional_aniclip` 时序表。
+真要做纯 2D 版本，只需把 `_world()` 的 3D 变换降成 2D 仿射（丢 `z`），其余数据完全复用。
+
+### 12.11 复现
+
+```powershell
+# 1) 导出（需 UnityPy）
+$py C:\...\python.exe E:\DSH\cq\tools\export_hero_cpu.py
+#    -> E:\DSH\cq\godot_cq\assets3d\hero_cpu.json
+
+# 2) 14 clip 全览（5 列）
+powershell -File E:\DSH\cq\tools\shot.ps1 -Tex texture_wi_5_5 `
+    -Out E:\DSH\cq\godot_out\sheet_all.png -Cell 256 -Cols 5 -Res 256x256
+
+# 3) 单帧
+powershell -File E:\DSH\cq\tools\shot.ps1 -Single -Clip critattack -Time 0.33 `
+    -Tex texture_wi_5_5 -Out E:\DSH\cq\godot_out\hero_critattack.png -Res 512x512
+```
+
+工具清单（`E:\DSH\cq\tools\`）：
+
+| 文件 | 作用 |
+|---|---|
+| `export_hero_cpu.py` | 导出单根 + 完整节点树 + 14 clip + 顶点/骨骼（当前主用） |
+| `export_hero_v2.py` | glTF 导出（IBM/JOINTS 已修对，但 Godot 导入器不可用，仅留作记录） |
+| `validate_gltf.py` | glTF 结构 + IBM + rest-pose 残差 + 每 clip bbox delta |
+| `dbg_ibm.py` | 独立复算 IBM 与 Unity `bindPose` 对照（test1–test5） |
+| `dbg_nodes.py` | glTF 29 节点 vs Unity 28 节点逐节点 TRS 对比（dt/dq/ds 全 0.0000） |
+| `chk_cpu_rest.py` | `hero_cpu.json` 的 rest-pose 残差（实测 mean 9.4e-06） |
+| `locate_streams.py` | 结构化定位 UV / blendIndex 流偏移 |
+| `dump_tris.py` | 三角与 UV 结构 dump |
+| `which_spine_renderer.py` / `scan_spine_cam.py` | 全量扫描 UI 包的 Spine 组件与相机 |
+| `inspect_cutscene.py` / `inspect_cutscene2.py` / `inspect_epilogue.py` | 立绘渲染路径勘定 |
+| `scan_cameras.py` | 相机正交/尺寸统计 |
+| `shot.ps1` | 渲染 + base64 解码落盘 |
+
+---
