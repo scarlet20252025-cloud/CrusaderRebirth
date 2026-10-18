@@ -390,6 +390,74 @@ python _re_work/render_anim2.py
 
 ---
 
+## 8. 实机运行时验证（最新）
+
+### 8.1 抓帧方法
+
+```powershell
+adb shell screencap -p /sdcard/x.png
+adb pull /sdcard/x.png out.png
+```
+
+**不能用** PowerShell 的 `adb exec-out screencap -p > out.png`：重定向会把二进制写坏，
+得到 magic 不是 `89 50 4E 47` 的假 PNG。
+
+坐标换算：MuMu 窗口预览 1708×961 → 设备 1920×1080，比例 **1.124**。
+
+实测可复现导航链（账号等级 131 已登录状态）：
+
+| 步骤 | 命令 | 说明 |
+|---|---|---|
+| 1 | `input tap 287 584` | 主城 → 冒险 |
+| 2 | `input tap 1400 562` | 卡片 → 试炼 |
+| 3 | `input tap 62 450` | 选中 1 组（按钮由灰转青） |
+| 4 | `input tap 1753 972` | 开始 |
+| 5 | `input tap 396 928` | 惊喜问答选「第 1 名」 |
+| 6 | `input tap 961 854` | 问答奖励确认 |
+| 7 | `input tap 326/500/674/848 624` | 依次点 4 名勇士 |
+| 8 | `input tap 1579 969` | 开始 |
+| 9 | `input tap 1135 852` | 队伍锁定确认 |
+
+### 8.2 观察结论：表现层是像素精灵，不是 3D 网格
+
+![实机战斗](anim/runtime_battle.png)
+
+![实机单位特写](anim/runtime_heroes.png)
+
+- 战斗中三名单位（约定之维多利亚 / 捕获大将卞剑秀 / 光明剑士里昂）呈**离散像素块**、无连续着色 → 2D 精灵路径（`tk2dSpriteCollectionData`）
+- 主城、剧情、加载画面同样是像素精灵
+- 数值表侧证据：`get_character_visual.drawmode` 只有 4 种取值
+  —— `None` **2858** / `CORRUPTED_HERO` **781** / `CORRUPTED_HERO2` **14** / `CORRUPTED_HERO3` **3**
+  —— **完全没有 `MODEL` / `FBX` 类取值**
+- `skin_tex` 以 `Fbx/` 开头的只有 **2 行**：
+  `CLA_MON_GUARDIANBEAST_LAPORTE` → `Fbx/MON/S2_Ep6_Chapter1/MON@S2_Ep6_Chapter1_Laforte/texture_mon_bs_cobaltknights_guardianbeast`
+  → 3D 路径是**特例**，不是常态
+- `skin_tex` 前缀分布：`PC/Texture` **2222** / `SKIN/MON` **1227** / `SKIN/NPC` **102** / `SKIN/OBJECT` **73** / `SKIN/OBJECT/blank` **49**
+
+### 8.3 与自研渲染的对照
+
+![左：自研渲染　右：实机](anim/cmp_mine_vs_game.png)
+
+- 左 = 本文软件蒙皮渲染（`polySurface6` + `texture_wa_6_1`），右 = 实机「光明剑士里昂」
+- 两者在**轮廓比例、配色分区（银白铠甲 + 金色头发 + 黄蓝巨剑）、武器形态**上一致
+- 由此**反证** `texture_wa_6_1` 就是战士 6★ `Hero_001` 的皮肤图，与
+  `skin_tex = PC/Texture/Hero/Hero_001/texture_wa_6_1` 完全对应，贴图注入不再是推测
+- **但必须说清**：实机表现层是精灵，本文的 3D 渲染属于"**资产级还原**"，
+  不等于"逐像素复现游戏画面"
+
+### 8.4 仍未定位：fbx 3D 路径的实际使用场景
+
+`fbx_pc`（159 clip）/ `fbx_pc@sword`（743 clip）的 3D 骨骼动画，
+在战斗（1 组阵容）与城镇场景中**均未观察到**。候选归宿（均未验证）：
+
+1. 特定大型 BOSS —— 即 `skin_tex` 走 `Fbx/MON/*` 的那 2 条记录
+2. 房屋/庄园 —— 存在 `animationclip_pc@house`（1,345,580 B）
+3. 剧情演出 —— `cutscene_*` 933 个 bundle
+
+这是当前最值得继续攻的点：它决定"743 个骨骼动画到底服务哪块玩法"。
+
+---
+
 ## 7. 地址速查
 
 | 用途 | 地址(modoff) |
