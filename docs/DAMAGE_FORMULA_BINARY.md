@@ -408,3 +408,336 @@ handler 决定**用哪个属性作为倍率来源**（`AtkDmg`/`HP`/`MAXHP`/`Def
 | `1/DEF_INCR_RATIO` | `0xE49F6C` | 294.117645264 |
 | 距离衰减 | 指令内立即数 | 80.0f (`0x42a00000`) |
 | `DAMAGE_DECREASE_MIN_CAP` | `Shared+0x6c` | 0.2 |
+
+---
+
+# 追加：暴击与命中的二进制级还原
+
+> 本章接在上文之后，同样是 ARM64 反汇编实证。
+> 上一章遗留的「暴击在哪生效」「命中率在哪判定」两个问题，本章给出答案。
+
+---
+
+## 11. 伤害结算类 `BattleEffectDamage`
+
+这是真正持有「本次伤害全部参数」的类（typeIndex **990**，16 个方法）。
+它的实例在 `BlowDamage` 里被构造、填充、然后调用 `ApplyStatic` 结算。
+
+| 方法 | 模块内偏移 | RID |
+|---|---|---|
+| `get_CriticalRatio` | `0x295A268` | 7922 |
+| `get_CriticalPower` | `0x295A288` | 7923 |
+| `get_Penetrate` | `0x295A2A8` | 7924 |
+| `get_AdditionalCritialPower` | `0x295A300` | 7925 |
+| `get_HitRate` | `0x295A310` | 7927 |
+| `.ctor` | `0x295A3F8` | 7929 |
+| `Init` | `0x295A50C` | 7930 |
+| `ContextSetupComplete` | `0x295A7F0` | 7931 |
+| `GetAdditionalFactor` | `0x295B808` | 7932 |
+| **`ApplyStatic`** | **`0x295A850`** | **7933** |
+| `GetDamageAmount` | `0x295BB80` | 7934 |
+| `UpdateDamageAmount` | `0x295BD0C` | 7935 |
+| `SetCriticalLogicOption` | `0x295BD14` | 7936 |
+| `UpdateSnapshot` | `0x295BD1C` | 7937 |
+| `SetExtraCriticalPower` | `0x295BD60` | 7938 |
+| `SetHitMissCheckFlag` | `0x295A7E0` | 7940 |
+
+---
+
+## 12. 暴击率与暴击倍率：**加法叠加，不是乘法**
+
+### 12.1 `get_CriticalRatio` @ `0x295A268`
+
+```asm
+0295A268  ldr   x8, [x0, #0x10]    ; x8 = 施法者 BattleUnit
+0295A26C  cbz   x8, #0x295a280
+0295A270  ldr   s0, [x8, #0x6c]    ; s0 = 施法者基础暴击率
+0295A274  ldr   s1, [x0, #0x3c]    ; s1 = 本次效果的额外暴击率
+0295A278  fadd  s0, s0, s1         ; 相加
+0295A27C  ret
+```
+
+**公式：**
+
+```
+暴击率 = 基础暴击率([unit+0x6c]) + 本次额外暴击率([effect+0x3c])
+```
+
+### 12.2 `get_CriticalPower` @ `0x295A288`
+
+```asm
+0295A288  ldr   x8, [x0, #0x10]
+0295A28C  cbz   x8, #0x295a2a0
+0295A290  ldr   s0, [x8, #0x70]    ; 施法者基础暴击伤害
+0295A294  ldr   s1, [x0, #0x40]    ; 额外暴击伤害
+0295A298  fadd  s0, s0, s1
+0295A29C  ret
+```
+
+**公式：**
+
+```
+暴击倍率 = 基础暴伤([unit+0x70]) + 额外暴伤([effect+0x40])
+```
+
+`SetExtraCriticalPower` @ `0x295BD60` 就是写 `[effect+0x40]`：
+
+```asm
+0295BD60  str   s0, [x0, #0x40]
+0295BD64  ret
+```
+
+### 12.3 为什么是「加法」
+
+两处都是 `fadd`，不是 `fmul`。这说明在《克鲁赛德战记》里：
+
+> 暴击率与暴击伤害都是**线性累加**的词条，不存在「暴击伤害倍率相乘」的叠乘模型。
+
+这也解释了为什么数值表里 `CRIT_PROB` / `CRIT_DMG` 的 `Default` 分别是 `0` 和 `1`
+（`championstatsettings`）：基础暴伤默认 1（即 100%，暴击只是不额外增伤），
+真正提升靠 `+0x40` 那个额外项往上加。
+
+---
+
+## 13. 暴击的掷骰：`Range(0,1)` + 比较
+
+`ApplyStatic` @ `0x295AE18` ~ `0x295AE6C`：
+
+```asm
+0295AE18  adrp  x8, #0x5259000
+0295AE1C  ldr   x8, [x8, #0xef0]   ; UnityEngine.Random
+0295AE20  ldr   x0, [x8]
+...
+0295AE30  movi  d0, #0                ; min = 0.0
+0295AE34  fmov  s1, #1.00000000       ; max = 1.0
+0295AE38  mov   x0, xzr
+0295AE3C  bl    #0x293728c           ; Random.Range(0,1)
+0295AE40  fcmp  s0, s11              ; 掷骰 vs 暴击率
+0295AE44  b.ge  #0x295b078           ; 掷骰 >= 暴击率 -> 不暴击
+0295AE48  cbz   w25, #0x295ae74      ; 暴击逻辑开关
+0295AE4C  cmp   w25, #0
+0295AE50  b.le  #0x295aed0
+0295AE54  ldr   s0, [x20, #0x70]     ; 攻击方暴伤
+0295AE58  ldr   s1, [x23, #0x10]     ; 受击方暴伤修正
+0295AE5C  mov   w22, #1
+0295AE60  fadd  s0, s0, s1
+0295AE64  fmov  s1, #1.00000000
+0295AE68  fadd  s0, s0, s1           ; + 1.0
+0295AE6C  fmul  s10, s0, s10         ; 伤害 *= (攻击方暴伤 + 受击方暴伤 + 1.0)
+```
+
+**暴击命中时的伤害倍率：**
+
+```
+伤害 *= (攻击方暴伤 + 受击方暴伤 + 1.0)
+```
+
+这个 `+1.0` 极其关键：它意味着**暴伤字段本身是「额外增幅」**，
+基础暴击（暴伤 = 0）的伤害倍率是 `1.0`（不增伤），而不是常见的 `2.0`。
+
+`Random.Range(0,1)` 的实现 @ `0x293728C`：
+
+```asm
+0293728C  stp   d9, d8, [sp, #-0x30]!
+02937298  fmov  s9, s1
+0293729C  fmov  s8, s0
+...
+029372EC  fsub  s9, s9, s8          ; s9 = max - min
+029372F0  ldp   x9, x1, [x8, #0x1b8]
+029372F4  blr   x9                  ; 调 Random.value (0..1)
+029372F8  fcvt  s0, d0
+0293730C  fmul  s0, s9, s0          ; (max-min) * value
+0293731C  fadd  s0, s0, s8          ; min + (max-min)*value
+02937324  ret
+```
+
+标准均匀分布插值，**不是** `UnityEngine.Random.Range` 的整数版本。
+
+---
+
+## 14. 命中率：`clamp(1 + 命中 - 闪避, 0.05, 0.95)`
+
+`ApplyStatic` @ `0x295AD28` ~ `0x295AD88`：
+
+```asm
+0295AD28  ldr   s12, [x20, #0x88]   ; s12 = 攻击方命中加成
+0295AD2C  ldr   s13, [x23, #0x18]   ; s13 = 攻击方额外命中
+0295AD30  mov   x1, xzr
+0295AD34  bl    #0x29195f8           ; s0 = 受击方闪避率
+0295AD38  ldr   s14, [sp, #0x98]     ; s14 = 受击方额外闪避
+0295AD40  fmov  s11, s0              ; s11 = 闪避
+0295AD44  bl    #0x2b9fdb4           ; get_Shared
+0295AD4C  ldr   s15, [x0, #0x58]     ; s15 = HITRATE_MIN_CAP = 0.05
+0295AD54  bl    #0x2b9fdb4
+0295AD5C  fmov  s0, #1.00000000
+0295AD60  ldr   s1, [x0, #0x5c]      ; s1 = HITRATE_MAX_CAP = 0.95
+0295AD6C  fadd  s0, s12, s0          ; 1.0 + 命中加成
+0295AD70  fadd  s0, s0, s13          ; + 额外命中
+0295AD74  fsub  s0, s0, s11          ; - 闪避
+0295AD78  fsub  s0, s0, s14          ; - 额外闪避
+0295AD7C  fcmp  s0, s1
+0295AD80  fcsel s1, s1, s0, gt       ; s1 = min(s0, 0.95)
+0295AD84  fcmp  s0, s15
+0295AD88  fcsel s11, s15, s1, mi     ; s11 = (s0 < 0.05) ? 0.05 : s1
+```
+
+**公式：**
+
+```
+命中率 = clamp(1.0 + 攻击方命中 + 攻击方额外命中
+                   - 受击方闪避 - 受击方额外闪避,
+               0.05, 0.95)
+```
+
+`0x58` / `0x5c` 就是 `battle_settings` 里的 `HITRATE_MIN_CAP 0.05` 与 `HITRATE_MAX_CAP 0.95`。
+
+也就是说：
+
+- **命中率永远在 5% ~ 95% 之间**，不存在必中或必闪
+- 命中/闪避是**线性加减**，同样不是乘法
+
+---
+
+## 15. 伤害上下限：`GetDamageAmount` @ `0x295BB80`
+
+```asm
+0295BBD0  ldr   w8, [x21, #0xb4]    ; 命中次数索引
+0295BBD4  ldr   s8, [x21, #0xa4]    ; 基础伤害
+0295BBD8  cbz   w8, #0x295bc3c
+...
+0295BC30  bl    #0x2985418          ; CountWithHash
+0295BC34  scvtf s0, w0
+0295BC38  fmul  s8, s8, s0          ; 伤害 *= 命中数量
+0295BC3C  fabs  s9, s8              ; 取绝对值
+0295BC40  ldr   w22, [x21, #0xac]
+0295BC88  bl    #0x299f638          ; GetBaseStat
+0295BC8C  fmul  s9, s9, s0
+0295BC90  ldrb  w8, [x21, #0x188]   ; 是否有上限
+0295BCA8  bl    #0x29c7678          ; GetValue -> s8 (上限)
+0295BCB8  ldrb  w8, [x21, #0x17c]   ; 是否有下限
+0295BCD8  mov   w8, #0x7f7fffff     ; 默认 FLT_MAX
+0295BCE0  fcmp  s9, s0
+0295BCF4  fcsel s0, s0, s9, gt      ; min(dmg, 上限)
+0295BCF8  fcmp  s9, s8
+0295BCFC  fcsel s0, s8, s0, mi      ; 若 dmg < 下限，取下限
+```
+
+**语义：**
+
+```
+dmg = |基础伤害 * 命中数量 * 基础属性系数|
+dmg = min(dmg, 上限)          ; 上限默认 FLT_MAX
+dmg = (dmg < 下限) ? 下限 : dmg
+```
+
+`0x7f7fffff` 是 IEEE754 单精度最大有限值（约 3.4028e38），作为「未配置上限」的哨兵值。
+
+---
+
+## 16. 调用图（更新版）
+
+```
+BattleEffectDamage.ApplyStatic (0x295A850)
+│   ├─ 命中判定  0x295AD28-0x295AD88   clamp(1+HIT-EVA, 0.05, 0.95)
+│   ├─ 暴击掷骰  0x295AE18-0x295AE6C   Random.Range(0,1) vs critRate
+│   └─ 暴击乘算  0x295AE54-0x295AE6C   dmg *= (atkCritDmg + defCritDmg + 1)
+│
+├─ BattleEffectDamage.GetDamageAmount (0x295BB80)   上下限钳制
+│
+└─ bl 0x291DF2C  BattleUnit.HandleDamage
+       │  w3 = 3   ← 注意：这里传的伤害类型是 3，不是 1/2/4
+       │
+       ├─ 防御/抗性减伤   0x2936288  1/(1+max(0,DEF-PEN)*0.0034)
+       ├─ 地板钳制        0x291F00C  max(0.2, 保留比例)
+       ├─ 距离衰减        0x291F3A8  dist/80.0
+       │
+       └─ bl 0x291F948  BattleUnit.BlowDamage
+              │
+              ├─ bl 0x293E36C  BattleUnitStateSnapshot..ctor（属性快照）
+              └─ bl 0x295A850  BattleEffectDamage.ApplyStatic（递归回上层）
+```
+
+**嵌套关系**：`ApplyStatic → HandleDamage → BlowDamage → ApplyStatic`。
+这不是无限递归 —— `BlowDamage` 里的两次 `ApplyStatic` 调用（`0x2920B64`、`0x2920D90`）
+传的是**不同的参数**（`w6 = -1`、`w8 = 5`），用于处理溅射/反伤/多段等衍生伤害，
+而衍生伤害的 `w3` 被固定为 `3`，在 `HandleDamage` 里走的是**不减伤**分支。
+
+> 待验证：`w24 == 3` 的确切语义。`HandleDamage` 里 `1`=物理、`2`=魔法、`4`=真伤，
+> `3` 走的是和 `4` 一样的「跳过减伤」路径，推测是「已结算过的衍生伤害」标记。
+
+---
+
+## 17. 更新后的已验证清单
+
+- [x] 物理减伤 `1/(1+max(0,DEF-PEN_DEF)*0.0034)`
+- [x] 魔法减伤 `1/(1+max(0,RST-PEN_RST)*0.0034)`
+- [x] 伤害地板 `max(0.2, 保留比例)`
+- [x] **暴击率 = 基础暴击率 + 额外暴击率（加法）**
+- [x] **暴伤 = 基础暴伤 + 额外暴伤（加法）**
+- [x] **暴击倍率 = 暴伤 + 1.0**
+- [x] **暴击掷骰用 `Random.Range(0,1)` 均匀分布**
+- [x] **命中率 = clamp(1+HIT-EVA, 0.05, 0.95)**
+- [x] 伤害上下限钳制（`GetDamageAmount`，默认上限 `FLT_MAX`）
+- [x] 距离衰减系数 `80.0`
+- [x] 「无视防御」= `[unit+0x14c] > 0` 时防御返回 0
+
+### 仍未定位
+
+- [ ] `ATKSPD_CAP 2.5` 在 `get_PrimaryAttackPerSec` @`0x29187A4` 的实现（未反汇编）
+- [ ] `DAMAGE_REDUCED 0.1` 的接入点
+- [ ] `LEADER_BLOCK_RATIO 1.75` 的队长块倍率
+- [ ] PVP 的 `Damage_revise 0.6` / `HP_revise 1.75` 是服务端还是客户端施加
+- [ ] `w24 == 3` 的确切语义
+- [ ] `get_VampRate` @`0x29191DC` 在 `BlowDamage` 里的吸血结算（已确认有调用点，未细读）
+
+---
+
+## 18. 追加的地址索引
+
+| 方法 / 函数 | 模块内偏移 |
+|---|---|
+| `BattleEffectDamage.get_CriticalRatio` | `0x295A268` |
+| `BattleEffectDamage.get_CriticalPower` | `0x295A288` |
+| `BattleEffectDamage.get_Penetrate` | `0x295A2A8` |
+| `BattleEffectDamage.get_AdditionalCritialPower` | `0x295A300` |
+| `BattleEffectDamage.get_HitRate` | `0x295A310` |
+| `BattleEffectDamage.ApplyStatic` | `0x295A850` |
+| `BattleEffectDamage.GetDamageAmount` | `0x295BB80` |
+| `BattleEffectDamage.SetCriticalLogicOption` | `0x295BD14` |
+| `BattleEffectDamage.SetExtraCriticalPower` | `0x295BD60` |
+| `BattleEffectDamage.SetHitMissCheckFlag` | `0x295A7E0` |
+| `BattleEffectDamage.ContextSetupComplete` | `0x295A7F0` |
+| `Random.Range`（float 版） | `0x293728C` |
+| `BattleUnit.get_PureCriticalRate` | `0x2919040` |
+| `BattleUnit.get_CriticalPower` | `0x29190AC` |
+| `BattleUnit.get_PureCriticalPower` | `0x2919170` |
+| `BattleUnit.get_VampRate` | `0x29191DC` |
+| `BattleUnit.get_HitRate` | `0x2919728` |
+| `BattleUnit.get_PureHitRate` | `0x29196BC` |
+| `BattleUnit.GetCurrentStateSnapshot` | `0x291C3B4` |
+| `BattleUnitStateSnapshot..ctor` | `0x293E36C` |
+| `PassiveFunctionHandler.CriticalCheckDoOnHit` | `0x29ABE24` |
+
+### `BattleUnitStateSnapshot` 字段布局（构造函数 `0x293E36C` 反推）
+
+| 偏移 | 内容 | 来源 |
+|---|---|---|
+| `+0x28` | 基础攻击 | `0x293E3EC` `[x20]` vtable `+0x1f8` |
+| `+0x2c` | 值 A | `0x293E404` `bl 0x292c2f0` |
+| `+0x30` | 值 B | `0x293E410` `stp s0,s1` |
+| `+0x34` | 值 C | `0x293E420` `bl 0x4d34b2c` |
+| `+0x38` | 双精度值 | `0x293E42C` `ldr d0,[x20,#0x468]` |
+| `+0x40` | 攻击力 | `0x293E448` vtable `+0x1d8` |
+| **`+0x44`** | **纯攻击（PureAtkDmg）** | **`0x293E45C` `bl 0x2918a50`** |
+| `+0x48` | 值 D | `0x293E468` `bl 0x291940c` |
+| **`+0x4c`** | **纯暴击率（PureCriticalRate）** | **`0x293E478` `bl 0x2919040`** |
+| **`+0x50`** | **纯暴击伤害（PureCriticalPower）** | **`0x293E488` `bl 0x2919170`** |
+| `+0x54` | 值 E | `0x293E498` `bl 0x2918de0` |
+| `+0x58` | 值 F | `0x293E4A8` `bl 0x2918f10` |
+| `+0x64` | 值 G | `0x293E4B0` `bl 0x29192a0` |
+| `+0x68` | 值 H | `0x293E4CC` vtable `+0x1c8` |
+
+这个快照被 `GetCurrentStateSnapshot` 的 10 个调用者使用，全部集中在
+**技能/被动条件判定**（`CompareStatSelfDoOnFire`、`CheckBuffCasterInvoke`、
+`RunWithoutAnimation`、`UpdateSnapshot`、`ApplyStatic`），
+不参与伤害主循环 —— 也就是说暴击的实际生效**不读快照**，而是读实时 `[unit+0x6c]` / `[unit+0x70]`。
